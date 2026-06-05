@@ -1,6 +1,10 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ndp
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -63,7 +67,7 @@ func SendRouterAdvertisements(interfaceName string, ras ...RouterAdvertisement) 
 
 	// Send each serialized Router Advertisement using the raw socket.
 	for _, serializedRA := range serializedRAs {
-		if err := c.Sendto(serializedRA, &unix.SockaddrLinklayer{Ifindex: iface.Index}, 0); err != nil {
+		if err := c.Sendto(context.Background(), serializedRA, 0, &unix.SockaddrLinklayer{Ifindex: iface.Index}); err != nil {
 			return err
 		}
 	}

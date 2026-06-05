@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -8,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/urfave/cli/v2"
@@ -18,18 +22,19 @@ import (
 	utilnet "k8s.io/utils/net"
 	"k8s.io/utils/ptr"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/addresssetmanager"
+	egresssvc "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/syncmap"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 var (
@@ -89,7 +94,99 @@ type nodeInfo struct {
 
 var egressPodLabel = map[string]string{"egress": "needed"}
 
-var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network", func() {
+var _ = ginkgo.Describe("Deprecated cluster node IP address set cleanup", func() {
+	var fakeOvn *FakeOVN
+
+	ginkgo.AfterEach(func() {
+		fakeOvn.shutdown()
+	})
+
+	ginkgo.It("cleans up unreferenced deprecated cluster node IP address sets", func() {
+		oldDefaultV4AS, oldDefaultV6AS := addressset.GetTestDbAddrSets(
+			getDeprecatedEgressIPClusterNodeIPsAddrSetDbIDsForNetwork(types.DefaultNetworkName),
+			[]string{"10.0.0.1", "fd00::1"},
+		)
+		oldBlueV4AS, oldBlueV6AS := addressset.GetTestDbAddrSets(
+			getDeprecatedEgressIPClusterNodeIPsAddrSetDbIDsForNetwork("blue"),
+			[]string{"10.0.0.2", "fd00::2"},
+		)
+		fakeOvn = NewFakeOVN(false)
+		fakeOvn.startWithDBSetup(libovsdbtest.TestSetup{
+			NBData: []libovsdbtest.TestData{oldDefaultV4AS, oldDefaultV6AS, oldBlueV4AS, oldBlueV6AS},
+		})
+
+		gomega.Expect(cleanupDeprecatedClusterNodeIPsAddressSet(fakeOvn.nbClient)).To(gomega.Succeed())
+
+		gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveEmptyData())
+	})
+
+	ginkgo.It("keeps deprecated cluster node IP address sets while referenced by matches", func() {
+		oldDefaultV4AS, oldDefaultV6AS := addressset.GetTestDbAddrSets(
+			getDeprecatedEgressIPClusterNodeIPsAddrSetDbIDsForNetwork(types.DefaultNetworkName),
+			[]string{"10.0.0.1", "fd00::1"},
+		)
+		oldBlueV4AS, oldBlueV6AS := addressset.GetTestDbAddrSets(
+			getDeprecatedEgressIPClusterNodeIPsAddrSetDbIDsForNetwork("blue"),
+			[]string{"10.0.0.2", "fd00::2"},
+		)
+		nat := &nbdb.NAT{
+			UUID:       "nat-UUID",
+			Type:       nbdb.NATTypeSNAT,
+			LogicalIP:  "10.128.0.0/14",
+			ExternalIP: "172.18.0.2",
+			Match:      fmt.Sprintf("ip4.dst == $%s", oldBlueV4AS.Name),
+		}
+		lrp := &nbdb.LogicalRouterPolicy{
+			UUID:     "lrp-UUID",
+			Priority: types.DefaultNoRereoutePriority,
+			Action:   nbdb.LogicalRouterPolicyActionAllow,
+			Match:    fmt.Sprintf("ip6.dst == $%s", oldDefaultV6AS.Name),
+		}
+		acl := libovsdbops.BuildACL(
+			"acl",
+			nbdb.ACLDirectionFromLport,
+			types.DefaultAllowPriority,
+			fmt.Sprintf("ip4.src == $%s || ip6.src == $%s", oldDefaultV4AS.Name, oldBlueV6AS.Name),
+			nbdb.ACLActionAllow,
+			types.OvnACLLoggingMeter,
+			"",
+			false,
+			nil,
+			nil,
+			types.DefaultACLTier,
+		)
+		acl.UUID = "acl-UUID"
+		router := &nbdb.LogicalRouter{
+			UUID:     "router-UUID",
+			Name:     "router",
+			Nat:      []string{nat.UUID},
+			Policies: []string{lrp.UUID},
+		}
+		logicalSwitch := &nbdb.LogicalSwitch{
+			UUID: "switch-UUID",
+			ACLs: []string{acl.UUID},
+		}
+		expectedDB := []libovsdbtest.TestData{
+			oldDefaultV4AS,
+			oldDefaultV6AS,
+			oldBlueV4AS,
+			oldBlueV6AS,
+			nat,
+			lrp,
+			acl,
+			router,
+			logicalSwitch,
+		}
+		fakeOvn = NewFakeOVN(false)
+		fakeOvn.startWithDBSetup(libovsdbtest.TestSetup{NBData: expectedDB})
+
+		gomega.Expect(cleanupDeprecatedClusterNodeIPsAddressSet(fakeOvn.nbClient)).To(gomega.Succeed())
+
+		gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(expectedDB))
+	})
+})
+
+var _ = ginkgo.Describe("OVN EgressIP Operations cluster default network", func() {
 	var (
 		app     *cli.App
 		fakeOvn *FakeOVN
@@ -163,9 +260,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				"k8s.ovn.org/node-transit-switch-port-ifaddr": fmt.Sprintf("{\"ipv4\":\"%s\"}", ni.transitPortIP), // used only for ic=true test
 				"k8s.ovn.org/zone-name":                       ni.zone,
 			}
-			if ni.zone != "global" {
-				annotations["k8s.ovn.org/remote-zone-migrated"] = ""
-			}
 			nodes = append(nodes, getNodeObj(fmt.Sprintf("node%d", nodeSuffix), annotations, map[string]string{}))
 			nodeSuffix = nodeSuffix + 1
 		}
@@ -194,9 +288,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				util.OVNNodeHostCIDRs:                         hostCIDRs,
 				"k8s.ovn.org/node-transit-switch-port-ifaddr": fmt.Sprintf("{\"ipv6\":\"%s\"}", ni.transitPortIP), // used only for ic=true test
 				"k8s.ovn.org/zone-name":                       ni.zone,
-			}
-			if ni.zone != "global" {
-				annotations["k8s.ovn.org/remote-zone-migrated"] = ""
 			}
 			nodes = append(nodes, getNodeObj(fmt.Sprintf("node%d", nodeSuffix), annotations, map[string]string{}))
 			nodeSuffix = nodeSuffix + 1
@@ -241,7 +332,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 	ginkgo.Context("On node UPDATE", func() {
 		ginkgo.It("OVN network does not depend on EgressIP status for assignment", func() {
-			config.OVNKubernetesFeature.EnableInterconnect = true
 			egressIP := "192.168.126.101"
 			zone := "global"
 			node1IPv4OVN := "192.168.126.202/24"
@@ -250,8 +340,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			node1IPv4SecondaryHost2 := "5.5.5.10/24"
 			node1IPv4Addresses := []string{node1IPv4OVN, node1IPv4SecondaryHost1, node1IPv4SecondaryHost2}
 
-			egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-			egressNamespace := newNamespace(eipNamespace)
+			egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+			egressNamespace := ovntest.NewNamespace(eipNamespace)
 			nodes := getIPv4Nodes([]nodeInfo{{node1IPv4Addresses, zone, node1IPv4TranSwitchIP}})
 			node1 := nodes[0]
 			node1.Labels = map[string]string{
@@ -284,10 +374,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				UUID: node1.Name + "-UUID",
 				Name: node1.Name,
 			}
-			dynamicNeighRouters := "true"
-			if config.OVNKubernetesFeature.EnableInterconnect {
-				dynamicNeighRouters = "false"
-			}
+			dynamicNeighRouters := "false"
 
 			logicalRouterOptions := map[string]string{
 				"dynamic_neigh_routers": dynamicNeighRouters,
@@ -391,7 +478,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				},
 				&nbdb.LogicalRouterPolicy{
 					Priority:    types.DefaultNoRereoutePriority,
-					Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+					Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 					Action:      nbdb.LogicalRouterPolicyActionAllow,
 					Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 					UUID:        "no-reroute-node-UUID",
@@ -450,7 +537,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 		})
 
 		ginkgo.It("Secondary host network does not depend on EgressIP status for assignment", func() {
-			config.OVNKubernetesFeature.EnableInterconnect = true
 			egressIP := "10.10.10.10"
 			zone := "global"
 			node1IPv4OVN := "192.168.126.202/24"
@@ -460,8 +546,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			_, node1Subnet, _ := net.ParseCIDR(v4Node1Subnet)
 			node1IPv4Addresses := []string{node1IPv4OVN, node1IPv4SecondaryHost1, node1IPv4SecondaryHost2}
 
-			egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-			egressNamespace := newNamespace(eipNamespace)
+			egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+			egressNamespace := ovntest.NewNamespace(eipNamespace)
 			nodes := getIPv4Nodes([]nodeInfo{{node1IPv4Addresses, zone, node1IPv4TranSwitchIP}})
 			node1 := nodes[0]
 			node1.Labels = map[string]string{
@@ -495,10 +581,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				Name:  node1.Name,
 				Ports: []string{"k8s-" + node1.Name + "-UUID"},
 			}
-			dynamicNeighRouters := "true"
-			if config.OVNKubernetesFeature.EnableInterconnect {
-				dynamicNeighRouters = "false"
-			}
+			dynamicNeighRouters := "false"
 
 			logicalRouterOptions := map[string]string{
 				"dynamic_neigh_routers": dynamicNeighRouters,
@@ -607,7 +690,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				},
 				&nbdb.LogicalRouterPolicy{
 					Priority:    types.DefaultNoRereoutePriority,
-					Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+					Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 					Action:      nbdb.LogicalRouterPolicyActionAllow,
 					Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 					UUID:        "no-reroute-node-UUID",
@@ -658,10 +741,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseState))
 		})
 
-		ginkgo.DescribeTable("[OVN network] should perform proper OVN transactions when pod is created after node egress label switch",
-			func(interconnect bool) {
+		ginkgo.It("[OVN network] should perform proper OVN transactions when pod is created after node egress label switch",
+			func() {
 				app.Action = func(*cli.Context) error {
-					config.OVNKubernetesFeature.EnableInterconnect = interconnect
 					egressIP := "192.168.126.101"
 
 					zone := "global"
@@ -676,8 +758,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node1IPv4Addresses := []string{node1IPv4OVN, node1IPv4SecondaryHost1, node1IPv4SecondaryHost2}
 					node2IPv4Addresses := []string{node2IPv4OVN, node2IPv4SecondaryHost1, node2IPv4SecondaryHost2}
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					nodes := getIPv4Nodes([]nodeInfo{{node1IPv4Addresses, zone, node1IPv4TranSwitchIP},
 						{node2IPv4Addresses, zone, node2IPv4TranSwitchIP}})
 					node1 := nodes[0]
@@ -716,10 +798,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						UUID: node2.Name + "-UUID",
 						Name: node2.Name,
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -871,7 +950,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -961,13 +1040,10 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled", false),
-			ginkgo.Entry("interconnect enabled", true),
 		)
 
-		ginkgo.DescribeTable("[OVN network] using EgressNode retry should perform proper OVN transactions when pod is created after node egress label switch",
-			func(interconnect bool) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+		ginkgo.It("[OVN network] using EgressNode retry should perform proper OVN transactions when pod is created after node egress label switch",
+			func() {
 				app.Action = func(*cli.Context) error {
 					egressIP := "192.168.126.101"
 					zone := "global"
@@ -994,8 +1070,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node2 := nodes[1]
 					node3 := nodes[2]
 					config.IPv4Mode = true
-					egressPod := *newPodWithLabels(eipNamespace, podName, node3Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node3Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 					eIP := egressipv1.EgressIP{
 						ObjectMeta: newEgressIPMeta(egressIPName),
@@ -1026,10 +1102,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						UUID: node3.Name + "-UUID",
 						Name: node3.Name,
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -1242,7 +1315,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -1361,13 +1434,10 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled", false),
-			ginkgo.Entry("interconnect enabled", true), // all 3 nodes in same zone, so behaves like non-ic
 		)
 
-		ginkgo.DescribeTable("[secondary host network] using EgressNode retry should perform proper OVN transactions when pod is created after node egress label switch",
-			func(interconnect bool) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+		ginkgo.It("[secondary host network] using EgressNode retry should perform proper OVN transactions when pod is created after node egress label switch",
+			func() {
 				app.Action = func(*cli.Context) error {
 					egressIP := "10.10.10.7"
 					zone := "global"
@@ -1397,8 +1467,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node2 := nodes[1]
 					node3 := nodes[2]
 					config.IPv4Mode = true
-					egressPod := *newPodWithLabels(eipNamespace, podName, node3Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node3Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 					eIP := egressipv1.EgressIP{
 						ObjectMeta: newEgressIPMeta(egressIPName),
@@ -1432,10 +1502,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						Name:  node3.Name,
 						Ports: []string{"k8s-" + node3.Name + "-UUID"},
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -1664,7 +1731,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -1785,13 +1852,10 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled", false),
-			ginkgo.Entry("interconnect enabled", true), // all 3 nodes in same zone, so behaves like non-ic
 		)
 
 		ginkgo.DescribeTable("[secondary host network] should perform proper OVN transactions when namespace and pod is created after node egress label switch",
 			func(interconnect bool, node1Zone, node2Zone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
 				app.Action = func(*cli.Context) error {
 					egressIP := "10.10.10.20"
 
@@ -1816,14 +1880,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"k8s.ovn.org/egress-assignable": "",
 					}
 					node2 := nodes[1]
-					if node1Zone != "global" {
-						node1.Annotations["k8s.ovn.org/remote-zone-migrated"] = node1Zone // used only for ic=true test
-					}
-					if node2Zone != "global" {
-						node2.Annotations["k8s.ovn.org/remote-zone-migrated"] = node2Zone // used only for ic=true test
-					}
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 					eIP := egressipv1.EgressIP{
 						ObjectMeta: newEgressIPMeta(egressIPName),
@@ -1852,10 +1911,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						Name:  node2.Name,
 						Ports: []string{"k8s-" + node2.Name + "-UUID"},
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -2019,7 +2075,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -2104,7 +2160,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						node2Switch.QOSRules = []string{"default-QoS-UUID"}
 					}
 					if node1Zone == "global" {
-						// QoS Rule is configured only for nodes in local zones, the master of the remote zone will do it for the remote nodes
+						// QoS Rule is configured only for nodes in local zones; the controller in the remote zone will do it for the remote nodes
 						node1Switch.QOSRules = []string{"default-QoS-UUID"}
 						ipNets, _ := util.ParseIPNets(append(node1IPv4Addresses, node2IPv4Addresses...))
 						egressNodeIPs := []string{}
@@ -2137,19 +2193,17 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global", "global"),
 			ginkgo.Entry("interconnect enabled; node1 and node2 in global zones", true, "global", "global"),
-			// will showcase localzone setup - master is in pod's zone where pod's reroute policy towards egressNode will be done.
+			// will showcase localzone setup - the controller for the pod's zone is local, where pod's reroute policy towards egressNode will be done.
 			// NOTE: SNAT won't be visible because its in remote zone
 			ginkgo.Entry("interconnect enabled; node1 in global and node2 in remote zones", true, "global", "remote"),
-			// will showcase localzone setup - master is in egress node's zone where pod's SNAT policy and static route will be done.
+			// will showcase localzone setup - the controller for the egress node's zone is local, where pod's SNAT policy and static route will be done.
 			// NOTE: reroute policy won't be visible because its in remote zone (pod is in remote zone)
 			ginkgo.Entry("interconnect enabled; node1 in remote and node2 in global zones", true, "remote", "global"),
 		)
 
 		ginkgo.DescribeTable("[mixed networks] should perform proper OVN transactions when namespace and pod is created after node egress label switch",
 			func(interconnect bool, node1Zone, node2Zone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
 				app.Action = func(*cli.Context) error {
 					egressIPOVN := "192.168.126.190"
 					egressIPSecondaryHost := "10.10.10.20"
@@ -2178,10 +2232,10 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node2 := nodes[1]
 					egressNamespace := newUDNNamespace(eipNamespace)
 					egressNamespace2 := newUDNNamespace(eipNamespace2)
-					egressPod1Node1 := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-					egressPod2Node1 := *newPodWithLabels(eipNamespace2, podName, node1Name, podV4IP2, egressPodLabel)
-					egressPod3Node2 := *newPodWithLabels(eipNamespace, podName2, node2Name, podV4IP3, egressPodLabel)
-					egressPod4Node2 := *newPodWithLabels(eipNamespace2, podName2, node2Name, podV4IP4, egressPodLabel)
+					egressPod1Node1 := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+					egressPod2Node1 := *ovntest.NewPodWithLabels(eipNamespace2, podName, node1Name, podV4IP2, egressPodLabel)
+					egressPod3Node2 := *ovntest.NewPodWithLabels(eipNamespace, podName2, node2Name, podV4IP3, egressPodLabel)
+					egressPod4Node2 := *ovntest.NewPodWithLabels(eipNamespace2, podName2, node2Name, podV4IP4, egressPodLabel)
 
 					eIPOVN := egressipv1.EgressIP{
 						ObjectMeta: newEgressIPMeta(egressIPName),
@@ -2228,10 +2282,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						Name:  node2.Name,
 						Ports: []string{"k8s-" + node2.Name + "-UUID"},
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -2462,7 +2513,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -2546,7 +2597,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						egressNodeIPsASv4,
 					}
 					if node1Zone != "remote" {
-						// QoS rules is configured only for nodes in local zones, the master of the remote zone will do it for the remote nodes
+						// QoS rules is configured only for nodes in local zones; the controller in the remote zone will do it for the remote nodes
 						node1Switch.QOSRules = []string{"default-QoS-UUID"}
 						expectedDatabaseState[3].(*nbdb.LogicalRouter).Nat = append(expectedDatabaseState[3].(*nbdb.LogicalRouter).Nat, "egressip-nat-UUID", "egressip2-nat-UUID")
 						expectedDatabaseState = append(expectedDatabaseState, &nbdb.NAT{
@@ -2589,12 +2640,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global", "global"),
 			ginkgo.Entry("interconnect enabled; node1 and node2 in global zones", true, "global", "global"),
-			// will showcase localzone setup - master is in pod's zone where pod's reroute policy towards egressNode will be done.
+			// will showcase localzone setup - the controller for the pod's zone is local, where pod's reroute policy towards egressNode will be done.
 			// NOTE: SNAT won't be visible because its in remote zone
 			ginkgo.Entry("interconnect enabled; node1 in global and node2 in remote zones", true, "global", "remote"),
-			// will showcase localzone setup - master is in egress node's zone where pod's SNAT policy and static route will be done.
+			// will showcase localzone setup - the controller for the egress node's zone is local, where pod's SNAT policy and static route will be done.
 			// NOTE: reroute policy won't be visible because its in remote zone (pod is in remote zone)
 			ginkgo.Entry("interconnect enabled; node1 in remote and node2 in global zones", true, "remote", "global"),
 		)
@@ -2604,8 +2654,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 	ginkgo.Context("On node DELETE", func() {
 
 		ginkgo.DescribeTable("should perform proper OVN transactions when node's gateway objects are already deleted",
-			func(interconnect bool, node1Zone, node2Zone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(node1Zone, node2Zone string) {
 				app.Action = func(*cli.Context) error {
 
 					egressIP := "192.168.126.101"
@@ -2614,17 +2663,14 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					_, node1Subnet, _ := net.ParseCIDR(v4Node1Subnet)
 					_, node2Subnet, _ := net.ParseCIDR(v4Node2Subnet)
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					annotations := map[string]string{
 						"k8s.ovn.org/node-primary-ifaddr":             fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", node1IPv4, ""),
 						"k8s.ovn.org/node-subnets":                    fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
 						"k8s.ovn.org/node-transit-switch-port-ifaddr": "{\"ipv4\":\"100.88.0.2/16\"}", // used only for ic=true test
 						"k8s.ovn.org/zone-name":                       node1Zone,
 						util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", node1IPv4),
-					}
-					if node1Zone != "global" {
-						annotations["k8s.ovn.org/remote-zone-migrated"] = node1Zone // used only for ic=true test
 					}
 					labels := map[string]string{
 						"k8s.ovn.org/egress-assignable": "",
@@ -2636,9 +2682,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"k8s.ovn.org/node-transit-switch-port-ifaddr": "{\"ipv4\":\"100.88.0.3/16\"}", // used only for ic=true test
 						"k8s.ovn.org/zone-name":                       node2Zone,                      // used only for ic=true test
 						util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", node2IPv4),
-					}
-					if node2Zone != "global" {
-						annotations["k8s.ovn.org/remote-zone-migrated"] = node2Zone // used only for ic=true test
 					}
 					labels = map[string]string{}
 					node2 := getNodeObj(node2Name, annotations, labels)
@@ -2670,10 +2713,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						Name:  node2.Name,
 						Ports: []string{"k8s-" + node2.Name + "-UUID"},
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -2795,7 +2835,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 					expectedNatLogicalPort := "k8s-node1"
-					primarySNAT := getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP, expectedNatLogicalPort, DefaultNetworkControllerName)
+					primarySNAT := getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP, expectedNatLogicalPort, types.DefaultNetworkControllerName)
 					primarySNAT.UUID = "egressip-nat1-UUID"
 					egressSVCServedPodsASv4, _ := buildEgressServiceAddressSets(nil)
 					servedPodIPs := []string{podV4IP}
@@ -2815,7 +2855,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						primarySNAT,
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -2926,7 +2966,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						expectedDatabaseState[6].(*nbdb.LogicalRouter).Policies = append(expectedDatabaseState[6].(*nbdb.LogicalRouter).Policies, "reroute-UUID")
 						node1Switch.QOSRules = []string{"default-QoS-UUID"}
 					} else {
-						// if node1 where the pod lives is remote we can't see the EIP setup done since master belongs to local zone
+						// if node1 where the pod lives is remote we can't see the EIP setup done since the local controller is in the local zone
 						expectedDatabaseState[4].(*nbdb.LogicalRouter).Nat = []string{}
 						expectedDatabaseState[6].(*nbdb.LogicalRouter).Policies = []string{"no-reroute-node-UUID", "default-no-reroute-UUID",
 							"no-reroute-service-UUID", "default-no-reroute-reply-traffic"}
@@ -2958,7 +2998,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP))
 
 					expectedNatLogicalPort = "k8s-node2"
-					eipSNAT := getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP, expectedNatLogicalPort, DefaultNetworkControllerName)
+					eipSNAT := getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP, expectedNatLogicalPort, types.DefaultNetworkControllerName)
 					egressSVCServedPodsASv4, _ = buildEgressServiceAddressSets(nil)
 					egressIPServedPodsASv4, _ = buildEgressIPServedPodsAddressSets([]string{podV4IP}, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName)
 					ip, _, _ := net.ParseCIDR(node2IPv4)
@@ -2969,7 +3009,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -3060,20 +3100,18 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global", "global"),
-			ginkgo.Entry("interconnect enabled; node1 and node2 in global zones", true, "global", "global"),
-			// will showcase localzone setup - master is in pod's zone where pod's reroute policy towards egressNode will be done.
+			ginkgo.Entry("node1 and node2 in global zones", "global", "global"),
+			// will showcase localzone setup - the controller for the pod's zone is local, where pod's reroute policy towards egressNode will be done.
 			// NOTE: SNAT won't be visible because its in remote zone
-			ginkgo.Entry("interconnect enabled; node1 in global and node2 in remote zones", true, "global", "remote"),
-			// will showcase localzone setup - master is in egress node's zone where pod's SNAT policy and static route will* be done.
+			ginkgo.Entry("node1 in global and node2 in remote zones", "global", "remote"),
+			// will showcase localzone setup - the controller for the egress node's zone is local, where pod's SNAT policy and static route will* be done.
 			// * the static route won't be visible because the pod's node node1 is getting deleted in this test
 			// NOTE: reroute policy won't be visible because its in remote zone (pod is in remote zone)
-			ginkgo.Entry("interconnect enabled; node1 in remote and node2 in global zones", true, "remote", "global"),
+			ginkgo.Entry("node1 in remote and node2 in global zones", "remote", "global"),
 		)
 
 		ginkgo.DescribeTable("[secondary host network] should perform proper OVN transactions when namespace and pod is created after node egress label switch",
 			func(interconnect bool, node1Zone, node2Zone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
 				app.Action = func(*cli.Context) error {
 					egressIP := "10.10.10.10"
 					node1IPv4OVN := "192.168.126.202/24"
@@ -3084,8 +3122,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					_, node1Subnet, _ := net.ParseCIDR(v4Node1Subnet)
 					_, node2Subnet, _ := net.ParseCIDR(v4Node2Subnet)
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 					node1IPv4Addresses := []string{node1IPv4OVN, node1IPv4SecondaryHost}
 					node2IPv4Addresses := []string{node2IPv4OVN}
@@ -3126,10 +3164,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						Name:  node2.Name,
 						Ports: []string{"k8s-" + node2.Name + "-UUID"},
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -3281,7 +3316,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -3379,7 +3414,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					}
 
 					if node1Zone == "global" {
-						// QoS Rule is configured only for nodes in local zones, the master of the remote zone will do it for the remote nodes
+						// QoS Rule is configured only for nodes in local zones; the controller in the remote zone will do it for the remote nodes
 						node1Switch.QOSRules = []string{"default-QoS-UUID"}
 					}
 					if node2Zone != "remote" {
@@ -3403,12 +3438,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global", "global"),
 			ginkgo.Entry("interconnect enabled; node1 and node2 in global zones", true, "global", "global"),
-			// will showcase localzone setup - master is in pod's zone where pod's reroute policy towards egressNode will be done.
+			// will showcase localzone setup - the controller for the pod's zone is local, where pod's reroute policy towards egressNode will be done.
 			// NOTE: SNAT won't be visible because its in remote zone
 			ginkgo.Entry("interconnect enabled; node1 in global and node2 in remote zones", true, "global", "remote"),
-			// will showcase localzone setup - master is in egress node's zone where pod's SNAT policy and static route will be done.
+			// will showcase localzone setup - the controller for the egress node's zone is local, where pod's SNAT policy and static route will be done.
 			// NOTE: reroute policy won't be visible because its in remote zone (pod is in remote zone)
 			ginkgo.Entry("interconnect enabled; node1 in remote and node2 in global zones", true, "remote", "global"),
 		)
@@ -3416,10 +3450,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 	ginkgo.Context("IPv4 on pod UPDATE", func() {
 		ginkgo.It("does not reconfigure or remove existing pod config if no change", func() {
-			config.OVNKubernetesFeature.EnableInterconnect = true
 			app.Action = func(*cli.Context) error {
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				nodeIPv4 := "192.168.126.210/24"
 				egressIP := net.ParseIP("192.168.126.211")
 				_, nodeSubnetV4, _ := net.ParseCIDR(v4Node1Subnet)
@@ -3430,7 +3463,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					"k8s.ovn.org/node-subnets":                    fmt.Sprintf("{\"default\":\"%s\",\"%s\"}", v4Node1Subnet, v6Node1Subnet),
 					"k8s.ovn.org/node-transit-switch-port-ifaddr": "{\"ipv4\":\"100.88.0.2/16\", \"ipv6\": \"fd97::2/64\"}",
 					util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", nodeIPv4),
-					"k8s.ovn.org/zone-name":                       node1Name,
+					"k8s.ovn.org/zone-name":                       "global",
 				}
 				node := getNodeObj(node1Name, annotations, map[string]string{}) // add node to avoid errori-ing out on transit switch IP fetch
 				fakeOvn.startWithDBSetup(
@@ -3510,7 +3543,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					getReRoutePolicy(egressPod.Status.PodIP, "4", "reroute-UUID", nodeLogicalRouterIPv4,
 						getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV4,
 							types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
-					getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP.String(), "k8s-node1", DefaultNetworkControllerName),
+					getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP.String(), "k8s-node1", types.DefaultNetworkControllerName),
 					&nbdb.LogicalRouter{
 						Name:     types.OVNClusterRouter,
 						UUID:     types.OVNClusterRouter + "-UUID",
@@ -3595,15 +3628,14 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 	ginkgo.Context("IPv6 on pod UPDATE", func() {
 
 		ginkgo.DescribeTable("should remove OVN pod egress setup when EgressIP stops matching pod label",
-			func(interconnect, isnode1Local, isnode2Local bool) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(isnode1Local, isnode2Local bool) {
 				config.IPv6Mode = true
 				app.Action = func(*cli.Context) error {
 
 					egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					node1IPv4 := "192.168.126.210/24"
 					_, node1SubnetV4, _ := net.ParseCIDR(v4Node1Subnet)
 					_, node1SubnetV6, _ := net.ParseCIDR(v6Node1Subnet)
@@ -3619,7 +3651,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					}
 					if !isnode1Local {
 						annotations["k8s.ovn.org/zone-name"] = "remote"
-						annotations["k8s.ovn.org/remote-zone-migrated"] = "remote" // used only for ic=true test
 					}
 					node1 := getNodeObj(node1Name, annotations, map[string]string{}) // add node to avoid errori-ing out on transit switch IP fetch
 
@@ -3636,13 +3667,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 					if !isnode2Local {
 						annotations["k8s.ovn.org/zone-name"] = "remote"
-						annotations["k8s.ovn.org/remote-zone-migrated"] = "remote" // used only for ic=true test
 					}
 					node2 := getNodeObj(node2Name, annotations, map[string]string{}) // add node to avoid errori-ing out on transit switch IP fetch
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -3760,7 +3787,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						getReRoutePolicy(egressPod.Status.PodIP, "6", "reroute-UUID", node2LogicalRouterIPv6,
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV6,
 								types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
-						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, DefaultNetworkControllerName),
+						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, types.DefaultNetworkControllerName),
 						&nbdb.LogicalRouter{
 							Name:     types.OVNClusterRouter,
 							UUID:     types.OVNClusterRouter + "-UUID",
@@ -3832,7 +3859,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(nodes[0]).To(gomega.Equal(node2Name))
 					gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP.String()))
 
-					podUpdate := newPod(eipNamespace, podName, node1Name, podV6IP)
+					podUpdate := ovntest.NewPod(eipNamespace, podName, node1Name, podV6IP)
 
 					_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod.Namespace).Update(context.TODO(), podUpdate, metav1.UpdateOptions{})
 					gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -3897,21 +3924,19 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, true, true),
-			ginkgo.Entry("interconnect enabled; pod and egressnode are in local zone", true, true, true),
-			ginkgo.Entry("interconnect enabled; pod is in local zone and egressnode is in remote zone", true, true, false), // snat won't be visible
-			ginkgo.Entry("interconnect enabled; pod is in remote zone and egressnode is in local zone", true, false, true),
+			ginkgo.Entry("pod and egressnode are in local zone", true, true),
+			ginkgo.Entry("pod is in local zone and egressnode is in remote zone", true, false), // snat won't be visible
+			ginkgo.Entry("pod is in remote zone and egressnode is in local zone", false, true),
 		)
 
 		ginkgo.DescribeTable("egressIP pod retry should remove OVN pod egress setup when EgressIP stops matching pod label",
-			func(interconnect bool, podZone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(podZone string) {
 				app.Action = func(*cli.Context) error {
 
 					egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0f")
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					nodes := getIPv6Nodes([]nodeInfo{
 						{[]string{"0:0:0:0:0:feff:c0a8:8e0c/64"}, podZone, "100.88.0.2/16"},
 						{[]string{"0:0:0:0:0:fedf:c0a8:8e0c/64"}, "global", "100.88.0.3/16"},
@@ -3920,10 +3945,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 					node2 := nodes[1]
 					_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -4033,7 +4055,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					expectedDatabaseState := []libovsdbtest.TestData{
 						getReRoutePolicy(egressPod.Status.PodIP, "6", "reroute-UUID", node2LogicalRouterIPv6,
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV6, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
-						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, DefaultNetworkControllerName),
+						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, types.DefaultNetworkControllerName),
 						&nbdb.LogicalRouter{
 							Name:     types.OVNClusterRouter,
 							UUID:     types.OVNClusterRouter + "-UUID",
@@ -4094,7 +4116,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(assignedNodes[0]).To(gomega.Equal(node2Name))
 					gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP.String()))
 
-					podUpdate := newPod(eipNamespace, podName, node1Name, podV6IP)
+					podUpdate := ovntest.NewPod(eipNamespace, podName, node1Name, podV6IP)
 					ginkgo.By("Bringing down NBDB")
 					// inject transient problem, nbdb is down
 					fakeOvn.controller.nbClient.Close()
@@ -4135,9 +4157,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in global zone", true, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in remote zone", true, "remote"), // static re-route is visible but reroute policy won't be
+			ginkgo.Entry("pod is in global zone", "global"),
+			ginkgo.Entry("pod is in remote zone", "remote"), // static re-route is visible but reroute policy won't be
 		)
 
 		ginkgo.It("should not treat pod update if pod already had assigned IP when it got the ADD", func() {
@@ -4145,14 +4166,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 				egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 				_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -4319,7 +4337,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(nodes[0]).To(gomega.Equal(node2Name))
 				gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP.String()))
 
-				podUpdate := newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, map[string]string{
+				podUpdate := ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, map[string]string{
 					"egress": "needed",
 					"some":   "update",
 				})
@@ -4509,20 +4527,16 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 	ginkgo.Context("On node DELETE", func() {
 
 		ginkgo.DescribeTable("should treat pod update if pod did not have an assigned IP when it got the ADD",
-			func(interconnect bool, podZone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(podZone string) {
 				app.Action = func(*cli.Context) error {
 
 					egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 					_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -4618,7 +4632,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(nodes[0]).To(gomega.Equal(node2Name))
 					gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP.String()))
 
-					podUpdate := newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+					podUpdate := ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
 					podUpdate.Annotations = map[string]string{
 						"k8s.ovn.org/pod-networks": fmt.Sprintf("{\"default\":{\"ip_addresses\":[\"%s/23\"],\"mac_address\":\"0a:58:0a:83:00:0f\",\"gateway_ips\":[\"%s\"],\"ip_address\":\"%s/23\",\"gateway_ip\":\"%s\"}}", podV6IP, v6GatewayIP, podV6IP, v6GatewayIP),
 					}
@@ -4640,7 +4654,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					expectedDatabaseState := []libovsdbtest.TestData{
 						getReRoutePolicy(podV6IP, "6", "reroute-UUID", node2LogicalRouterIPv6,
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV6, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
-						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, DefaultNetworkControllerName),
+						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, types.DefaultNetworkControllerName),
 						&nbdb.LogicalRouter{
 							Name:     types.OVNClusterRouter,
 							UUID:     types.OVNClusterRouter + "-UUID",
@@ -4695,9 +4709,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in global zone", true, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in remote zone", true, "remote"), // static re-route is visible but reroute policy won't be
+			ginkgo.Entry("pod is in global zone", "global"),
+			ginkgo.Entry("pod is in remote zone", "remote"), // static re-route is visible but reroute policy won't be
 		)
 
 		ginkgo.It("should not treat pod DELETE if pod did not have an assigned IP when it got the ADD and we receive a DELETE before the IP UPDATE", func() {
@@ -4705,8 +4718,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 				egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				fakeOvn.startWithDBSetup(clusterRouterDbSetup,
 					&corev1.NamespaceList{
 						Items: []corev1.Namespace{*egressNamespace},
@@ -4766,26 +4779,19 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 	ginkgo.Context("IPv6 on namespace UPDATE", func() {
 
 		ginkgo.DescribeTable("should remove OVN pod egress setup when EgressIP is deleted",
-			func(interconnect bool, podZone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(podZone string) {
 				app.Action = func(*cli.Context) error {
 
 					egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-					egressNamespace := newNamespaceWithLabels(eipNamespace, egressPodLabel)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespaceWithLabels(eipNamespace, egressPodLabel)
 					// pod lives on node 1, therefore set the zone
 					node1 := newNodeGlobalZoneNotEgressableV6Only(node1Name, "0:0:0:0:0:feff:c0a8:8e0c/64")
 					node1.Annotations["k8s.ovn.org/zone-name"] = podZone
-					if podZone != "global" {
-						node1.Annotations["k8s.ovn.org/remote-zone-migrated"] = podZone // used only for ic=true test
-					}
 					_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 					_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -4889,7 +4895,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					expectedDatabaseState := []libovsdbtest.TestData{
 						getReRoutePolicy(egressPod.Status.PodIP, "6", "reroute-UUID", node2LogicalRouterIPv6,
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV6, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
-						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, DefaultNetworkControllerName),
+						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, types.DefaultNetworkControllerName),
 						&nbdb.LogicalRouter{
 							Name:     types.OVNClusterRouter,
 							UUID:     types.OVNClusterRouter + "-UUID",
@@ -4998,32 +5004,24 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in global zone", true, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in remote zone", true, "remote"),
+			ginkgo.Entry("pod is in global zone", "global"),
+			ginkgo.Entry("pod is in remote zone", "remote"),
 		)
 
 		ginkgo.DescribeTable("egressIP retry should remove OVN pod egress setup when EgressIP is deleted",
-			func(interconnect bool, podZone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(podZone string) {
 				app.Action = func(*cli.Context) error {
 
 					egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-					egressNamespace := newNamespaceWithLabels(eipNamespace, egressPodLabel)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespaceWithLabels(eipNamespace, egressPodLabel)
 					// pod is host by node 1 therefore we set its zone
 					node1 := newNodeGlobalZoneNotEgressableV6Only(node1Name, "0:0:0:0:0:fedf:c0a8:8e0c/64")
 					node1.Annotations["k8s.ovn.org/zone-name"] = podZone
-					if podZone != "global" {
-						node1.Annotations["k8s.ovn.org/remote-zone-migrated"] = podZone // used only for ic=true test
-					}
 					_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 					_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -5148,7 +5146,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					expectedDatabaseState := []libovsdbtest.TestData{
 						getReRoutePolicy(egressPod.Status.PodIP, "6", "reroute-UUID", nodeLogicalRouterIPv6,
 							getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV6, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()),
-						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, DefaultNetworkControllerName),
+						getEIPSNAT(podV6IP, egressPod.Namespace, egressPod.Name, egressIP.String(), expectedNatLogicalPort, types.DefaultNetworkControllerName),
 						&nbdb.LogicalRouter{
 							Name:     types.OVNClusterRouter,
 							UUID:     types.OVNClusterRouter + "-UUID",
@@ -5255,33 +5253,25 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in global zone", true, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in remote zone", true, "remote"),
+			ginkgo.Entry("pod is in global zone", "global"),
+			ginkgo.Entry("pod is in remote zone", "remote"),
 		)
 
 		ginkgo.DescribeTable("should remove OVN pod egress setup when EgressIP stops matching",
-			func(interconnect bool, podZone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
+			func(podZone string) {
 				app.Action = func(*cli.Context) error {
 
 					egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-					egressNamespace := newNamespaceWithLabels(eipNamespace, egressPodLabel)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespaceWithLabels(eipNamespace, egressPodLabel)
 					// pod is hosted by node 1 therefore we set its zone
 					node1 := newNodeGlobalZoneNotEgressableV6Only(node1Name, "0:0:0:0:0:feff:c0a8:8e0c/64")
 					node1.Annotations["k8s.ovn.org/zone-name"] = podZone
-					if podZone != "global" {
-						node1.Annotations["k8s.ovn.org/remote-zone-migrated"] = podZone // used only for ic=true test
-					}
 					_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 					_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-					egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets(nil, types.DefaultNetworkName, DefaultNetworkControllerName)
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets(nil, types.DefaultNetworkName, types.DefaultNetworkControllerName)
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -5452,7 +5442,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(nodes[0]).To(gomega.Equal(node2Name))
 					gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP.String()))
 
-					namespaceUpdate := newNamespace(eipNamespace)
+					namespaceUpdate := ovntest.NewNamespace(eipNamespace)
 
 					_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Namespaces().Update(context.TODO(), namespaceUpdate, metav1.UpdateOptions{})
 					gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -5509,9 +5499,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in global zone", true, "global"),
-			ginkgo.Entry("interconnect enabled; pod is in remote zone", true, "remote"),
+			ginkgo.Entry("pod is in global zone", "global"),
+			ginkgo.Entry("pod is in remote zone", "remote"),
 		)
 
 		ginkgo.It("should not remove OVN pod egress setup when EgressIP stops matching, but pod never had any IP to begin with", func() {
@@ -5519,8 +5508,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 				egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
-				egressNamespace := newNamespaceWithLabels(eipNamespace, egressPodLabel)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
+				egressNamespace := ovntest.NewNamespaceWithLabels(eipNamespace, egressPodLabel)
 				fakeOvn.startWithDBSetup(clusterRouterDbSetup,
 					&corev1.NamespaceList{
 						Items: []corev1.Namespace{*egressNamespace},
@@ -5565,7 +5554,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(nodes[0]).To(gomega.Equal(node2Name))
 				gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP.String()))
 
-				namespaceUpdate := newNamespace(eipNamespace)
+				namespaceUpdate := ovntest.NewNamespace(eipNamespace)
 
 				_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Namespaces().Update(context.TODO(), namespaceUpdate, metav1.UpdateOptions{})
 				gomega.Expect(err).ToNot(gomega.HaveOccurred())
@@ -5581,7 +5570,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 		ginkgo.DescribeTable("should update OVN on EgressIP .spec.egressips change",
 			func(interconnect bool, node1Zone, node2Zone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
 				app.Action = func(*cli.Context) error {
 
 					egressIP1 := "192.168.126.101"
@@ -5592,8 +5580,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node2IPv4 := "192.168.126.51"
 					node2IPv4CIDR := node2IPv4 + "/24"
 					_, node1Subnet, _ := net.ParseCIDR(v4Node1Subnet)
-					egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					annotations := map[string]string{
 						"k8s.ovn.org/node-primary-ifaddr":             fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", node1IPv4CIDR, ""),
 						"k8s.ovn.org/node-subnets":                    fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
@@ -5601,9 +5589,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"k8s.ovn.org/zone-name":                       node1Zone,                      // used only for ic=true test
 						util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", node1IPv4CIDR),
 						util.OvnNodeID:                                "2",
-					}
-					if node1Zone != "global" {
-						annotations["k8s.ovn.org/remote-zone-migrated"] = node1Zone // used only for ic=true test
 					}
 					labels := map[string]string{
 						"k8s.ovn.org/egress-assignable": "",
@@ -5616,9 +5601,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"k8s.ovn.org/zone-name":                       node2Zone,                      // used only for ic=true test
 						util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", node2IPv4CIDR),
 						util.OvnNodeID:                                "3",
-					}
-					if node2Zone != "global" {
-						annotations["k8s.ovn.org/remote-zone-migrated"] = node2Zone // used only for ic=true test
 					}
 					node2 := getNodeObj(node2Name, annotations, labels)
 					_, node2Subnet, _ := net.ParseCIDR(v4Node2Subnet)
@@ -5650,10 +5632,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						Name:  node2Name,
 						Ports: []string{"k8s-" + node2Name + "-UUID"},
 					}
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
@@ -6118,12 +6097,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global", "global"),
 			ginkgo.Entry("interconnect enabled; node1 and node2 in single zone", true, "global", "global"),
-			// will showcase localzone setup - master is in pod's zone where pod's reroute policy towards egressNode will be done.
+			// will showcase localzone setup - the controller for the pod's zone is local, where pod's reroute policy towards egressNode will be done.
 			// NOTE: SNAT won't be visible because its in remote zone
 			ginkgo.Entry("interconnect enabled; node1 in local and node2 in remote zones", true, "local", "remote"),
-			// will showcase localzone setup - master is in egress node's zone where pod's SNAT policy and static route will be done.
+			// will showcase localzone setup - the controller for the egress node's zone is local, where pod's SNAT policy and static route will be done.
 			// NOTE: reroute policy won't be visible because its in remote zone (pod is in remote zone)
 			ginkgo.Entry("interconnect enabled; node1 in remote and node2 in local zones", true, "remote", "local"),
 		)
@@ -6134,15 +6112,12 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				egressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8e0d")
 				updatedEgressIP := net.ParseIP("0:0:0:0:0:feff:c0a8:8ffd")
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
-				egressNamespace := newNamespaceWithLabels(eipNamespace, egressPodLabel)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV6IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespaceWithLabels(eipNamespace, egressPodLabel)
 				_, node1Subnet, _ := net.ParseCIDR(v6Node1Subnet)
 				_, node2Subnet, _ := net.ParseCIDR(v6Node2Subnet)
-				egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets(nil, types.DefaultNetworkName, DefaultNetworkControllerName)
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets(nil, types.DefaultNetworkName, types.DefaultNetworkControllerName)
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -6475,10 +6450,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					Name:  node2Name,
 					Ports: []string{"k8s-" + node2Name + "-UUID"},
 				}
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -6688,10 +6660,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					util.OVNNodeHostCIDRs:             fmt.Sprintf("[\"%s\"]", nodeIPv4),
 				}
 				node := getNodeObj("node", annotations, map[string]string{})
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -6845,8 +6814,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4 := "192.168.126.12"
 				node1IPv4CIDR := node1IPv4 + "/24"
 				_, node1Subnet, _ := net.ParseCIDR(v4Node1Subnet)
-				egressPod1 := *newPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod1 := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", node1IPv4CIDR),
 					"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
@@ -6886,10 +6855,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					Name:  node1.Name,
 					Ports: []string{"k8s-" + node1.Name + "-UUID"},
 				}
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -6971,8 +6937,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				expectedNatLogicalPort1 := "k8s-node1"
 
 				nodeSwitch.QOSRules = []string{"default-QoS-UUID"}
-
-				namespaceAddressSetv4, _ := buildNamespaceAddressSets(eipNamespace, []string{egressPodIP.String()})
 
 				egressSVCServedPodsASv4, _ := buildEgressServiceAddressSets(nil)
 				egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets([]string{egressPodIP.String()}, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName)
@@ -7065,7 +7029,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					egressSVCServedPodsASv4,
 					egressIPServedPodsASv4,
 					egressNodeIPsASv4,
-					namespaceAddressSetv4,
 				}
 				podLSP := &nbdb.LogicalSwitchPort{
 					UUID:      util.GetLogicalPortName(egressPod1.Namespace, egressPod1.Name) + "-UUID",
@@ -7076,7 +7039,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"namespace": egressPod1.Namespace,
 					},
 					Options: map[string]string{
-						libovsdbops.RequestedChassis: egressPod1.Spec.NodeName,
+						libovsdbops.RequestedChassis: node1.Annotations[util.OvnNodeChassisID],
 						"iface-id-ver":               egressPod1.Name,
 					},
 					PortSecurity: []string{podAddr},
@@ -7095,7 +7058,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				nodeSwitch.Ports = []string{"k8s-" + node1.Name + "-UUID"} // remove the pod port
 				egressIPServedPodsASv4.Addresses = nil
-				namespaceAddressSetv4.Addresses = nil
 				expectedDatabaseStateWithoutPod := []libovsdbtest.TestData{
 					&nbdb.LogicalRouterPolicy{
 						Priority: types.DefaultNoRereoutePriority,
@@ -7163,7 +7125,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					egressSVCServedPodsASv4,
 					egressIPServedPodsASv4,
 					egressNodeIPsASv4,
-					namespaceAddressSetv4,
 				}
 				gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(expectedDatabaseStateWithoutPod))
 				// recreate pod with same name immediately; simulating handler race (pods v/s egressip) condition,
@@ -7198,10 +7159,10 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4CIDR := node1IPv4 + "/24"
 				_, node1Subnet, _ := net.ParseCIDR(v4Node1Subnet)
 				oldEgressPodIP := "10.128.0.50"
-				egressPod1 := newPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
+				egressPod1 := ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
 				oldAnnotation := map[string]string{"k8s.ovn.org/pod-networks": `{"default":{"ip_addresses":["10.128.0.50/24"],"mac_address":"0a:58:0a:80:00:05","gateway_ips":["10.128.0.1"],"routes":[{"dest":"10.128.0.0/24","nextHop":"10.128.0.1"}],"ip_address":"10.128.0.50/24","gateway_ip":"10.128.0.1"}}`}
 				egressPod1.Annotations = oldAnnotation
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", node1IPv4CIDR),
@@ -7242,10 +7203,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					Name:  node1.Name,
 					Ports: []string{"k8s-" + node1.Name + "-UUID"},
 				}
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -7352,7 +7310,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				egressSVCServedPodsASv4, _ := buildEgressServiceAddressSets(nil)
 				egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets([]string{oldEgressPodIP}, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName)
 				egressNodeIPsASv4, _ := buildEgressIPNodeAddressSets([]string{node1IPv4})
-				namespaceAddressSetv4, _ := buildNamespaceAddressSets(eipNamespace, []string{egressPodIP.String()})
 
 				expectedDatabaseStatewithPod := []libovsdbtest.TestData{
 					podEIPSNAT,
@@ -7417,7 +7374,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					getDefaultQoSRule(false, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName),
 					egressSVCServedPodsASv4,
 					egressNodeIPsASv4,
-					namespaceAddressSetv4,
 					egressIPServedPodsASv4,
 				}
 				podLSP := &nbdb.LogicalSwitchPort{
@@ -7429,7 +7385,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"namespace": egressPod1.Namespace,
 					},
 					Options: map[string]string{
-						libovsdbops.RequestedChassis: egressPod1.Spec.NodeName,
+						libovsdbops.RequestedChassis: node1.Annotations[util.OvnNodeChassisID],
 						"iface-id-ver":               egressPod1.Name,
 					},
 					PortSecurity: []string{podAddr},
@@ -7466,7 +7422,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				// recreate pod with same name immediately;
 				ginkgo.By("should add egress IP setup for the NEW pod which exists in logicalPortCache")
 				newEgressPodIP := "10.128.0.60"
-				egressPod1 = newPodWithLabels(eipNamespace, podName, node1Name, newEgressPodIP, egressPodLabel)
+				egressPod1 = ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, newEgressPodIP, egressPodLabel)
 				egressPod1.Annotations = map[string]string{"k8s.ovn.org/pod-networks": `{"default":{"ip_addresses":["10.128.0.60/24"],"mac_address":"0a:58:0a:80:00:06","gateway_ips":["10.128.0.1"],"routes":[{"dest":"10.128.0.0/24","nextHop":"10.128.0.1"}],"ip_address":"10.128.0.60/24","gateway_ip":"10.128.0.1"}}`}
 				gomega.Eventually(func() error {
 					_, err = fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod1.Namespace).Create(context.TODO(), egressPod1, metav1.CreateOptions{})
@@ -7499,7 +7455,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				podAddr = fmt.Sprintf("%s %s", podPortInfo.mac.String(), egressPodIP)
 				podLSP.Addresses = []string{podAddr}
 				podLSP.PortSecurity = []string{podAddr}
-				namespaceAddressSetv4.Addresses = []string{egressPodIP.String()}
 				gomega.Eventually(fakeOvn.nbClient).Should(libovsdbtest.HaveData(finalDatabaseStatewithPod))
 				return nil
 			}
@@ -7510,7 +7465,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 		ginkgo.DescribeTable("egressIP pod managed by multiple objects, verify standby works wells, verify syncPodAssignmentCache on restarts",
 			func(interconnect bool, node1Zone, node2Zone string) {
-				config.OVNKubernetesFeature.EnableInterconnect = interconnect
 				app.Action = func(*cli.Context) error {
 
 					config.Gateway.DisableSNATMultipleGWs = true
@@ -7523,8 +7477,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node2IPv4 := "192.168.126.13"
 					node2IPv4CIDR := node2IPv4 + "/24"
 
-					egressPod1 := *newPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod1 := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, "", egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					annotations := map[string]string{
 						"k8s.ovn.org/node-primary-ifaddr":             fmt.Sprintf("{\"ipv4\": \"%s\"}", node1IPv4CIDR),
 						"k8s.ovn.org/node-subnets":                    fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
@@ -7533,9 +7487,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"k8s.ovn.org/node-transit-switch-port-ifaddr": "{\"ipv4\":\"100.88.0.2/16\"}", // used only for ic=true test
 						"k8s.ovn.org/zone-name":                       node1Zone,                      // used only for ic=true test
 						util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", node1IPv4CIDR),
-					}
-					if node1Zone != "global" {
-						annotations["k8s.ovn.org/remote-zone-migrated"] = node1Zone // used only for ic=true test
 					}
 					labels := map[string]string{
 						"k8s.ovn.org/egress-assignable": "",
@@ -7549,9 +7500,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						"k8s.ovn.org/node-transit-switch-port-ifaddr": "{\"ipv4\":\"100.88.0.3/16\"}", // used only for ic=true test
 						"k8s.ovn.org/zone-name":                       node2Zone,                      // used only for ic=true test
 						util.OVNNodeHostCIDRs:                         fmt.Sprintf("[\"%s\"]", node2IPv4CIDR),
-					}
-					if node2Zone != "global" {
-						annotations["k8s.ovn.org/remote-zone-migrated"] = node2Zone // used only for ic=true test
 					}
 					node2 := getNodeObj(node2Name, annotations, map[string]string{})
 					eIP1 := egressipv1.EgressIP{
@@ -7718,7 +7666,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					ePod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod1.Namespace).Get(context.TODO(), egressPod1.Name, metav1.GetOptions{})
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
-					egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{})
+					egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{}, nil)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					egressNetPodIP, _, err := net.ParseCIDR(egressPodPortInfo.ips[0].String())
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -7782,8 +7730,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					egressIPServedPodsASv4, _ := buildEgressIPServedPodsAddressSets([]string{egressPodIP[0].String()}, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName)
 					egressNodeIPsASv4, _ := buildEgressIPNodeAddressSets([]string{node1IPv4, node2IPv4})
 
-					namespaceAddressSetv4, _ := buildNamespaceAddressSets(eipNamespace, []string{egressPodIP[0].String()})
-
 					expectedDatabaseStatewithPod := []libovsdbtest.TestData{
 						podEIPSNAT,
 						podReRoutePolicy,
@@ -7845,7 +7791,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						egressSVCServedPodsASv4,
 						egressIPServedPodsASv4,
 						egressNodeIPsASv4,
-						namespaceAddressSetv4,
 					}
 					podLSP := &nbdb.LogicalSwitchPort{
 						UUID:      util.GetLogicalPortName(egressPod1.Namespace, egressPod1.Name) + "-UUID",
@@ -7856,7 +7801,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							"namespace": egressPod1.Namespace,
 						},
 						Options: map[string]string{
-							libovsdbops.RequestedChassis: egressPod1.Spec.NodeName,
+							libovsdbops.RequestedChassis: node1.Annotations[util.OvnNodeChassisID],
 							"iface-id-ver":               egressPod1.Name,
 						},
 						PortSecurity: []string{podAddr},
@@ -8101,7 +8046,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					finalDatabaseStatewithPod = expectedDatabaseStatewithPod
 					finalDatabaseStatewithPod = append(expectedDatabaseStatewithPod, podLSP)
 					podEIPSNAT.ExternalIP = egressIP3
-					podEIPSNAT.ExternalIDs = getEgressIPNATDbIDs(egressIP2Name, egressPod1.Namespace, egressPod1.Name, IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs()
+					podEIPSNAT.ExternalIDs = getEgressIPNATDbIDs(egressIP2Name, egressPod1.Namespace, egressPod1.Name, IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs()
 					podReRoutePolicy.ExternalIDs = getEgressIPLRPReRouteDbIDs(egressIP2Name, egressPod1.Namespace, egressPod1.Name, IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs()
 					if assginedNodeForEIPObj2 == node2.Name {
 						podEIPSNAT.LogicalPort = ptr.To("k8s-node2")
@@ -8155,12 +8100,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("interconnect disabled; non-ic - single zone setup", false, "global", "global"),
 			ginkgo.Entry("interconnect enabled; node1 and node2 in global zones", true, "global", "global"),
-			// will showcase localzone setup - master is in pod's zone where pod's reroute policy towards egressNode will be done.
+			// will showcase localzone setup - the controller for the pod's zone is local, where pod's reroute policy towards egressNode will be done.
 			// NOTE: SNAT won't be visible because its in remote zone
 			ginkgo.Entry("interconnect enabled; node1 in global and node2 in remote zones", true, "global", "remote"),
-			// will showcase localzone setup - master is in egress node's zone where pod's SNAT policy and static route will be done.
+			// will showcase localzone setup - the controller for the egress node's zone is local, where pod's SNAT policy and static route will be done.
 			// NOTE: reroute policy won't be visible because its in remote zone (pod is in remote zone)
 			ginkgo.Entry("interconnect enabled; node1 in remote and node2 in global zones", true, "remote", "global"),
 		)
@@ -8901,7 +8845,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		})
 
-		ginkgo.It("should remove stale EgressIP setup when node label is removed while ovnkube-master is not running and assign to newly labelled node", func() {
+		ginkgo.It("should remove stale EgressIP setup when node label is removed while ovnkube-controller is not running and assign to newly labelled node", func() {
 			app.Action = func(*cli.Context) error {
 
 				egressIP1 := "192.168.126.25"
@@ -8910,8 +8854,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node2IPv4 := "192.168.126.5"
 				node2IPv4CIDR := node2IPv4 + "/24"
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", node1IPv4CIDR, ""),
 					"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
@@ -9177,14 +9121,14 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		})
 
-		ginkgo.It("should remove stale EgressIP setup when pod is deleted while ovnkube-master is not running", func() {
+		ginkgo.It("should remove stale EgressIP setup when pod is deleted while ovnkube-controller is not running", func() {
 			app.Action = func(*cli.Context) error {
 
 				egressIP1 := "192.168.126.25"
 				node1IPv4 := "192.168.126.51"
 				node1IPv4CIDR := node1IPv4 + "/24"
 
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", node1IPv4CIDR, ""),
@@ -9229,11 +9173,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 								Match:       "ip4.src == 10.128.0.0/14 && ip4.dst == 10.128.0.0/14",
 								Priority:    types.DefaultNoRereoutePriority,
 								Action:      nbdb.LogicalRouterPolicyActionAllow,
-								ExternalIDs: getEgressIPLRPNoReRoutePodToPodDbIDs(IPFamilyValueV4, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPLRPNoReRoutePodToPodDbIDs(IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs(),
 							},
 							&nbdb.LogicalRouterPolicy{
 								UUID:        "remove-me-UUID",
-								ExternalIDs: getEgressIPLRPReRouteDbIDs(eIP.Name, egressNamespace.Name, "doesnt-exist-pod", IPFamilyValueV4, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPLRPReRouteDbIDs(eIP.Name, egressNamespace.Name, "doesnt-exist-pod", IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Match:       "ip.src == 10.128.3.8",
 								Priority:    types.EgressIPReroutePriority,
 								Action:      nbdb.LogicalRouterPolicyActionReroute,
@@ -9252,7 +9196,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 								UUID:        "egressip-nat-UUID",
 								LogicalIP:   podV4IP,
 								ExternalIP:  egressIP1,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, eipNamespace, podName, IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, eipNamespace, podName, IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: &expectedNatLogicalPort,
 								Options: map[string]string{
@@ -9279,7 +9223,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 								Name:     node1Name,
 								QOSRules: []string{"default-QoS-UUID"},
 							},
-							getDefaultQoSRule(false, types.DefaultNetworkName, DefaultNetworkControllerName),
+							getDefaultQoSRule(false, types.DefaultNetworkName, types.DefaultNetworkControllerName),
 						},
 					},
 					&egressipv1.EgressIPList{
@@ -9376,15 +9320,15 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		})
 
-		ginkgo.It("should remove stale pod SNAT referring to wrong logical port after ovnkube-master is started", func() {
+		ginkgo.It("should remove stale pod SNAT referring to wrong logical port after ovnkube-controller is started", func() {
 			app.Action = func(*cli.Context) error {
 				config.Gateway.DisableSNATMultipleGWs = true
 				egressIP := "192.168.126.25"
 				node1IPv4 := "192.168.126.12"
 				node1IPv4CIDR := node1IPv4 + "/24"
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", node1IPv4CIDR),
@@ -9451,12 +9395,12 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							},
 							node1Switch,
 							// This is unexpected snat entry where its logical port refers to an unavailable node
-							// and ensure this entry is removed as soon as ovnk master is up and running.
+							// and ensure this entry is removed as soon as ovnkube-controller is up and running.
 							&nbdb.NAT{
 								UUID:        "egressip-nat-UUID2",
 								LogicalIP:   podV4IP,
 								ExternalIP:  egressIP,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, eipNamespace, podName, IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, eipNamespace, podName, IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: ptr.To("k8s-node2"),
 								Options: map[string]string{
@@ -9503,7 +9447,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				ePod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod.Namespace).Get(context.TODO(), egressPod.Name, metav1.GetOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{})
+				egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{}, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				egressNetPodIP, _, err := net.ParseCIDR(egressPodPortInfo.ips[0].String())
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -9517,7 +9461,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(nodes[0]).To(gomega.Equal(node1.Name))
 				gomega.Expect(egressIPs[0]).To(gomega.Equal(egressIP))
 
-				podEIPSNAT := getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP, "k8s-node1", DefaultNetworkControllerName)
+				podEIPSNAT := getEIPSNAT(podV4IP, egressPod.Namespace, egressPod.Name, egressIP, "k8s-node1", types.DefaultNetworkControllerName)
 				podReRoutePolicy := getReRoutePolicy(egressPodIP[0].String(), "4", "reroute-UUID", nodeLogicalRouterIPv4,
 					getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, types.DefaultNetworkName, fakeOvn.controller.eIPC.controllerName).GetExternalIDs())
 				node1GR.Nat = []string{"egressip-nat-UUID"}
@@ -10354,9 +10298,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4 := "192.168.126.12"
 				node1IPv4CIDR := node1IPv4 + "/24"
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
 				egressPod.Status.Phase = corev1.PodSucceeded
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 				node1 := corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
@@ -10475,7 +10419,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				ePod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod.Namespace).Get(context.TODO(), egressPod.Name, metav1.GetOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{})
+				egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{}, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				egressNetPodIP, _, err := net.ParseCIDR(egressPodPortInfo.ips[0].String())
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -10551,8 +10495,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4 := "192.168.126.12"
 				node1IPv4CIDR := node1IPv4 + "/24"
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 				node1 := corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
@@ -10672,7 +10616,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				ePod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod.Namespace).Get(context.TODO(), egressPod.Name, metav1.GetOptions{})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
-				egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{})
+				egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{}, nil)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				egressNetPodIP, _, err := net.ParseCIDR(egressPodPortInfo.ips[0].String())
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -10843,8 +10787,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node1IPv4CIDR := node1IPv4 + "/24"
 					expectedNatLogicalPort := "k8s-node1"
 
-					egressPod := *newPodWithLabelsAllIPFamilies(eipNamespace, podName, node1Name, []string{podV4IP, podV6IP}, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod := *ovntest.NewPodWithLabelsAllIPFamilies(eipNamespace, podName, node1Name, []string{podV4IP, podV6IP}, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 					node1 := corev1.Node{
 						ObjectMeta: metav1.ObjectMeta{
@@ -10999,7 +10943,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					ePod, err := fakeOvn.fakeClient.KubeClient.CoreV1().Pods(egressPod.Namespace).Get(context.TODO(), egressPod.Name, metav1.GetOptions{})
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
-					egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{})
+					egressPodIP, err := util.GetPodIPsOfNetwork(ePod, &util.DefaultNetInfo{}, nil)
 					index := 0 //ipv4 address at zero index
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					egressNetPodIP, _, err := net.ParseCIDR(egressPodPortInfo.ips[0].String())
@@ -11149,7 +11093,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 		ginkgo.It("should update SNAT and LRP nexthops during simultaneous EIP failover and ovnkube-controller restart", func() {
 			app.Action = func(*cli.Context) error {
 				config.Gateway.DisableSNATMultipleGWs = true
-				config.OVNKubernetesFeature.EnableInterconnect = true
 
 				egressIP := "192.168.126.101"
 				node1IPv4 := "192.168.126.12"
@@ -11163,9 +11106,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node3IPv4CIDR := node3IPv4 + "/24"
 				node3IPv4TranSwitchIP := "100.88.0.4/16"
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressPod2 := *newPodWithLabels(eipNamespace, podName2, node3Name, podV4IP2, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressPod2 := *ovntest.NewPodWithLabels(eipNamespace, podName2, node3Name, podV4IP2, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
 				nodes := getIPv4Nodes([]nodeInfo{{[]string{node1IPv4CIDR}, "global", node1IPv4TranSwitchIP},
 					{[]string{node2IPv4CIDR}, "remote", node2IPv4TranSwitchIPCIDR}, {[]string{node3IPv4CIDR}, "remote", node3IPv4TranSwitchIP}})
@@ -11643,10 +11586,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 
 		ginkgo.DescribeTable(
 			"should ensure EgressIP skips host-network and pending pods from namespace",
-			func(includeUnscheduled, includeScheduledButNoIP, includeHostNetwork, interconnect, isPodRemote bool) {
+			func(includeUnscheduled, includeScheduledButNoIP, includeHostNetwork, isPodRemote bool) {
 				app.Action = func(*cli.Context) error {
 					config.Gateway.DisableSNATMultipleGWs = true
-					config.OVNKubernetesFeature.EnableInterconnect = interconnect
 
 					egressIP1 := "192.168.126.101"
 					node1IPv4 := "192.168.126.12"
@@ -11654,9 +11596,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					node2IPv4 := "192.168.126.51"
 					node2IPv4CIDR := node2IPv4 + "/24"
 
-					egressPod3 := *newPodWithLabels(eipNamespace, "egress-pod3", node1Name, podV4IP, egressPodLabel)
-					egressPod4 := *newPodWithLabels(eipNamespace, "egress-pod4", node1Name, podV4IP2, egressPodLabel)
-					egressNamespace := newNamespace(eipNamespace)
+					egressPod3 := *ovntest.NewPodWithLabels(eipNamespace, "egress-pod3", node1Name, podV4IP, egressPodLabel)
+					egressPod4 := *ovntest.NewPodWithLabels(eipNamespace, "egress-pod4", node1Name, podV4IP2, egressPodLabel)
+					egressNamespace := ovntest.NewNamespace(eipNamespace)
 					annotations := map[string]string{
 						"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", node1IPv4CIDR),
 						"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
@@ -11676,7 +11618,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					}
 					if isPodRemote {
 						annotations["k8s.ovn.org/zone-name"] = "remote"
-						annotations["k8s.ovn.org/remote-zone-migrated"] = "remote"
 					}
 					node2 := getNodeObj(node2Name, annotations, map[string]string{})
 
@@ -11706,7 +11647,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					pods := []corev1.Pod{egressPod3, egressPod4}
 					if includeUnscheduled {
 						unScheduledPod := corev1.Pod{
-							ObjectMeta: newPodMeta(eipNamespace, "egress-pod", egressPodLabel),
+							ObjectMeta: ovntest.NewPodMeta(eipNamespace, "egress-pod", egressPodLabel),
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{
 									{
@@ -11723,20 +11664,17 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					}
 					var pendingScheduledPodWithNoIP *corev1.Pod
 					if includeScheduledButNoIP {
-						pendingScheduledPodWithNoIP = newPodWithLabels(eipNamespace, "egress-pod1", node2Name, "", egressPodLabel)
+						pendingScheduledPodWithNoIP = ovntest.NewPodWithLabels(eipNamespace, "egress-pod1", node2Name, "", egressPodLabel)
 						pendingScheduledPodWithNoIP.Status.Phase = corev1.PodPending
 						pods = append(pods, *pendingScheduledPodWithNoIP)
 					}
 					if includeHostNetwork {
-						hnPod := *newPodWithLabels(eipNamespace, "egress-pod2", node2Name, node2IPv4, egressPodLabel)
+						hnPod := *ovntest.NewPodWithLabels(eipNamespace, "egress-pod2", node2Name, node2IPv4, egressPodLabel)
 						hnPod.Spec.HostNetwork = true
 						pods = append(pods, hnPod)
 					}
 
-					dynamicNeighRouters := "true"
-					if config.OVNKubernetesFeature.EnableInterconnect {
-						dynamicNeighRouters = "false"
-					}
+					dynamicNeighRouters := "false"
 					logicalRouterOptions := map[string]string{
 						"dynamic_neigh_routers": dynamicNeighRouters,
 					}
@@ -11770,14 +11708,14 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 									Match:       fmt.Sprintf("ip4.src == %s", node2IPv4),
 									Action:      nbdb.LogicalRouterPolicyActionReroute,
 									Nexthops:    []string{"100.64.0.2"},
-									ExternalIDs: getEgressIPLRPReRouteDbIDs(egressIPName, eipNamespace, "egress-pod2", IPFamilyValueV4, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs(),
+									ExternalIDs: getEgressIPLRPReRouteDbIDs(egressIPName, eipNamespace, "egress-pod2", IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs(),
 									UUID:        "hostnet-pod-reroute-UUID1",
 								},
 								&nbdb.NAT{
 									UUID:        "hostnet-pod-egressip-nat-UUID1",
 									LogicalIP:   node2IPv4,
 									ExternalIP:  egressIP1,
-									ExternalIDs: getEgressIPNATDbIDs(egressIPName, eipNamespace, "egress-pod2", IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+									ExternalIDs: getEgressIPNATDbIDs(egressIPName, eipNamespace, "egress-pod2", IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 									Type:        nbdb.NATTypeSNAT,
 									LogicalPort: &expectedNatLogicalPort1,
 									Options: map[string]string{
@@ -12131,15 +12069,12 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				err := app.Run([]string{app.Name})
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			},
-			ginkgo.Entry("unscheduled pending pod only, interconnect disabled", true, false, false, false, false),
-			ginkgo.Entry("scheduled pending pod only, interconnect disabled", false, true, false, false, false),
-			ginkgo.Entry("host-networked pod only, interconnect disabled", false, false, true, false, false),
-			ginkgo.Entry("unscheduled pending pod only, interconnect enabled, local pod", true, false, false, true, false),
-			ginkgo.Entry("scheduled pending pod only, interconnect enabled, local pod", false, true, false, true, false),
-			ginkgo.Entry("host-networked pod only, interconnect enabled, local pod", false, false, true, true, false),
-			ginkgo.Entry("unscheduled pending pod only, interconnect enabled, remote pod", true, false, false, true, true),
-			ginkgo.Entry("scheduled pending pod only, interconnect enabled, remote pod", false, true, false, true, true),
-			ginkgo.Entry("host-networked pod only, interconnect enabled, remote pod", false, false, true, true, true),
+			ginkgo.Entry("unscheduled pending pod only, local pod", true, false, false, false),
+			ginkgo.Entry("scheduled pending pod only, local pod", false, true, false, false),
+			ginkgo.Entry("host-networked pod only, local pod", false, false, true, false),
+			ginkgo.Entry("unscheduled pending pod only, remote pod", true, false, false, true),
+			ginkgo.Entry("scheduled pending pod only, remote pod", false, true, false, true),
+			ginkgo.Entry("host-networked pod only, remote pod", false, false, true, true),
 		)
 
 		ginkgo.It("should not deadlock when two EgressIP pods are hosted and egress through opposite nodes", func() {
@@ -12150,7 +12085,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			// (https://github.com/ovn-kubernetes/ovn-kubernetes/blob/fdb1f44bb04cc7f90ba06ca2782d494d5a8068fc/go-controller/pkg/ovn/egressip.go#L1053).
 			// Note: Multiple test runs may be required to consistently reproduce this issue.
 			app.Action = func(*cli.Context) error {
-				config.OVNKubernetesFeature.EnableInterconnect = true
 				egressIP1 := "192.168.126.101"
 				egressIP2 := "192.168.126.102"
 				zone := "global"
@@ -12161,11 +12095,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node2IPv4TranSwitchIP := "100.88.0.3/16"
 				node2IPv4Addresses := []string{node2IPv4OVN}
 
-				egressPod := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 
-				egressPod2 := *newPodWithLabels(eipNamespace2, podName2, node2Name, podV4IP2, egressPodLabel)
-				egressNamespace2 := newNamespace(eipNamespace2)
+				egressPod2 := *ovntest.NewPodWithLabels(eipNamespace2, podName2, node2Name, podV4IP2, egressPodLabel)
+				egressNamespace2 := ovntest.NewNamespace(eipNamespace2)
 
 				nodes := getIPv4Nodes([]nodeInfo{{node1IPv4Addresses, zone, node1IPv4TranSwitchIP}, {node2IPv4Addresses, zone, node2IPv4TranSwitchIP}})
 				gomega.Expect(nodes).To(gomega.HaveLen(2))
@@ -12232,10 +12166,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					UUID: node2.Name + "-UUID",
 					Name: node2.Name,
 				}
-				dynamicNeighRouters := "true"
-				if config.OVNKubernetesFeature.EnableInterconnect {
-					dynamicNeighRouters = "false"
-				}
+				dynamicNeighRouters := "false"
 
 				logicalRouterOptions := map[string]string{
 					"dynamic_neigh_routers": dynamicNeighRouters,
@@ -12402,7 +12333,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -12535,7 +12466,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 						},
 						&nbdb.LogicalRouterPolicy{
 							Priority:    types.DefaultNoRereoutePriority,
-							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a712973235162149816",
+							Match:       "(ip4.src == $a8519615025667110816 || ip4.src == $a13607449821398607916) && ip4.dst == $a1042611113178530741",
 							Action:      nbdb.LogicalRouterPolicyActionAllow,
 							Options:     map[string]string{"pkt_mark": types.EgressIPNodeConnectionMark},
 							UUID:        "no-reroute-node-UUID",
@@ -12626,9 +12557,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node2IPv4 := "192.168.126.51"
 				node2IPv4CIDR := node2IPv4 + "/24"
 
-				egressPod1 := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressPod2 := *newPodWithLabels(eipNamespace, "egress-pod2", node2Name, "10.128.0.16", egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod1 := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressPod2 := *ovntest.NewPodWithLabels(eipNamespace, "egress-pod2", node2Name, "10.128.0.16", egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\"}", node1IPv4CIDR),
 					"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":\"%s\"}", v4Node1Subnet),
@@ -13489,7 +13420,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4CIDR := node1IPv4 + "/24"
 				node1IPv6 := "::feff:c0a8:8e0c"
 				node1IPv6CIDR := node1IPv6 + "/64"
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", node1IPv4CIDR, node1IPv6CIDR),
 					"k8s.ovn.org/node-subnets":        "{\"default\":[\"10.128.0.0/23\", \"10.132.0.0/23\", \"fd69::1/120\"]}",
@@ -13724,8 +13655,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node3IPv4 := "192.168.126.61"
 				node3IPv4CIDR := node3IPv4 + "/24"
 
-				egressPod1 := *newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod1 := *ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				annotations := map[string]string{
 					"k8s.ovn.org/node-primary-ifaddr": fmt.Sprintf("{\"ipv4\": \"%s\", \"ipv6\": \"%s\"}", node1IPv4CIDR, node1IPv6CIDR),
 					"k8s.ovn.org/node-subnets":        fmt.Sprintf("{\"default\":[\"%s\", \"%s\"]}", v4Node1Subnet, v6Node1Subnet),
@@ -14403,7 +14334,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			// reconcile and update the local pod LRP (attached to cluster router) next hops to reflect the current state.
 			// removes invalid next hop from LRP. Controller may have missed the signal that the EIP moved to another node.
 			app.Action = func(*cli.Context) error {
-				config.OVNKubernetesFeature.EnableInterconnect = true
 				if isV6 {
 					config.IPv6Mode = true
 				} else {
@@ -14462,9 +14392,9 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 					return getNodeObj(n.nodeName, nodeAnnotations, map[string]string{})
 				}
 				node1, node2, node3 := generateNodeObj(nodes[0]), generateNodeObj(nodes[1]), generateNodeObj(nodes[2])
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				podIP := getSupportedByIPFamily(podV4IP, podV6IP)
-				egressPod := newPodWithLabels(eipNamespace, podName, node1.Name, podIP, egressPodLabel)
+				egressPod := ovntest.NewPodWithLabels(eipNamespace, podName, node1.Name, podIP, egressPodLabel)
 				eipIP1 := getSupportedByIPFamily("192.168.126.200", "fc00:f853:ccd:e793::200")
 				eipIP2 := getSupportedByIPFamily("192.168.126.201", "fc00:f853:ccd:e793::201")
 				ginkgo.By("creating EgressIP that is assigned to node 2 and node 3")
@@ -14513,14 +14443,14 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							// LRPs to support EIP assigned to local and a remote node
 							getReRoutePolicy(podIP, getSupportedOVNIPFamily(), "stale-reroute-UUID",
 								staleHops, getEgressIPLRPReRouteDbIDs(eIPObj.Name, egressPod.Namespace, egressPod.Name,
-									getSupportedIPFamilyForDBID(), types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									getSupportedIPFamilyForDBID(), types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							// stale NAT to support EIP that was previously assigned to the local node but OVN DB config persists
 							&nbdb.NAT{
 								UUID:       "stale-nat-UUID",
 								LogicalIP:  podIP,
 								ExternalIP: eipIP1,
 								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressPod.Namespace, egressPod.Name, getSupportedIPFamilyForDBID(),
-									DefaultNetworkControllerName).GetExternalIDs(),
+									types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: getNodeLogicalPortName(node1.Name),
 								Options: map[string]string{
@@ -14642,13 +14572,12 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			// node 1 is local zone and egress Node.
 			// pod was on node 2 but it is deleted. Node 2 previously was also an egress Node.
 			app.Action = func(*cli.Context) error {
-				config.OVNKubernetesFeature.EnableInterconnect = true
 				// dual stack cluster
 				config.IPv4Mode = true
 				config.IPv6Mode = true
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				egressPod := corev1.Pod{
-					ObjectMeta: newPodMeta(eipNamespace, podName, egressPodLabel),
+					ObjectMeta: ovntest.NewPodMeta(eipNamespace, podName, egressPodLabel),
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
@@ -14728,18 +14657,18 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							// Valid LRP for IPv4 egress node. IPv4 egress Node is local. IPv6 egress node is remote and deleted but ovn config remains
 							getReRoutePolicy(podV4IP, "4", "valid-reroute-ipv4-UUID",
 								nodeLogicalRouterIPv4, getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name,
-									IPFamilyValueV4, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							// invalid LRP for IPv6 because remove node is deleted
 							getReRoutePolicy(podV6IP, "6", "invalid-reroute-ipv6-UUID",
 								[]string{node2TranSwitchIPv6}, getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name,
-									IPFamilyValueV6, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									IPFamilyValueV6, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							// NATs to support EIP assigned to the local node
 							// valid NAT
 							&nbdb.NAT{
 								UUID:        "valid-nat-ipv4-UUID",
 								LogicalIP:   podV4IP,
 								ExternalIP:  eipIPv4,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: &node1NatLogicalPortName,
 								Options: map[string]string{
@@ -14751,7 +14680,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 								UUID:        "invalid-nat-ipv4-UUID",
 								LogicalIP:   deletedPodIPv4,
 								ExternalIP:  eipIPv4,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressNamespace.Namespace, "deletedpod", IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressNamespace.Namespace, "deletedpod", IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: &node1NatLogicalPortName,
 								Options: map[string]string{
@@ -14824,7 +14753,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				expectedDatabaseState := []libovsdbtest.TestData{
 					getReRoutePolicy(podV4IP, "4", "valid-reroute-ipv4-UUID",
 						nodeLogicalRouterIPv4, getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name,
-							IPFamilyValueV4, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+							IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 					&nbdb.NAT{
 						UUID:        "valid-egressip-nat-UUID",
 						LogicalIP:   podV4IP,
@@ -14883,12 +14812,11 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 			// further references to "local" or "remote" imply local or remote OVN zone for IC.
 			// one EIP object with two assigned IPs of different IP families (v4 and v6) which select one pod that's local
 			app.Action = func(*cli.Context) error {
-				config.OVNKubernetesFeature.EnableInterconnect = true
 				// dual stack cluster
 				config.IPv4Mode = true
 				config.IPv6Mode = true
 				egressPod := corev1.Pod{
-					ObjectMeta: newPodMeta(eipNamespace, podName, egressPodLabel),
+					ObjectMeta: ovntest.NewPodMeta(eipNamespace, podName, egressPodLabel),
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{
 							{
@@ -14906,7 +14834,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				}
 				// deletedPodIP is a pod IP of a Pod that was deleted while eip controller was not running therefore config will exist in OVN DBs to support EIP
 				deletedPodIPv4, deletedPod2IPv4, deletedPodIPv6, deletedPod2IPv6 := podV4IP2, "10.128.0.20", podV6IP2, podV6IP3
-				egressNamespace := newNamespace(eipNamespace)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				// node 1 (local zone)
 				node1IPv4 := "192.168.126.210"
 				Node1IPv4CIDR := node1IPv4 + "/24"
@@ -14987,24 +14915,24 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 							// valid LRP for IPv4/IPv6. IPv4 Egress Node is local, IPv6 is remote
 							getReRoutePolicy(podV4IP, "4", "valid-reroute-ipv4-UUID",
 								nodeLogicalRouterIPv4, getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name,
-									IPFamilyValueV4, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									IPFamilyValueV4, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							getReRoutePolicy(podV6IP, "6", "valid-reroute-ipv6-UUID",
 								[]string{node2TranSwitchIPv6}, getEgressIPLRPReRouteDbIDs(eIP.Name, egressPod.Namespace, egressPod.Name,
-									IPFamilyValueV6, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									IPFamilyValueV6, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							// invalid lrps to redirect to the remote egress node for deleted pods
 							getReRoutePolicy(deletedPodIPv6, "6", "invalid-reroute-ipv6-UUID",
 								[]string{node2TranSwitchIPv6}, getEgressIPLRPReRouteDbIDs(eIP.Name, "UNKNOWN", "UNKNOWN",
-									IPFamilyValueV6, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									IPFamilyValueV6, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							getReRoutePolicy(deletedPod2IPv6, "6", "invalid-reroute2-ipv6-UUID",
 								[]string{node2TranSwitchIPv6}, getEgressIPLRPReRouteDbIDs(eIP.Name, "UNKNOWN", "UNKNOWN",
-									IPFamilyValueV6, types.DefaultNetworkName, DefaultNetworkControllerName).GetExternalIDs()),
+									IPFamilyValueV6, types.DefaultNetworkName, types.DefaultNetworkControllerName).GetExternalIDs()),
 							// NATs to support EIP assigned to the local node
 							// valid NAT
 							&nbdb.NAT{
 								UUID:        "valid-nat-ipv4-UUID",
 								LogicalIP:   podV4IP,
 								ExternalIP:  eipIPv4,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, egressPod.Namespace, egressPod.Name, IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: &node1NatLogicalPortName,
 								Options: map[string]string{
@@ -15016,7 +14944,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 								UUID:        "invalid-nat-ipv4-UUID",
 								LogicalIP:   deletedPodIPv4,
 								ExternalIP:  eipIPv4,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, "UNKNOWN", "UNKNOWN", IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, "UNKNOWN", "UNKNOWN", IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: &node1NatLogicalPortName,
 								Options: map[string]string{
@@ -15027,7 +14955,7 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 								UUID:        "invalid-nat2-ipv4-UUID",
 								LogicalIP:   deletedPod2IPv4,
 								ExternalIP:  eipIPv4,
-								ExternalIDs: getEgressIPNATDbIDs(egressIPName, "UNKNOWN", "UNKNOWN", IPFamilyValueV4, DefaultNetworkControllerName).GetExternalIDs(),
+								ExternalIDs: getEgressIPNATDbIDs(egressIPName, "UNKNOWN", "UNKNOWN", IPFamilyValueV4, types.DefaultNetworkControllerName).GetExternalIDs(),
 								Type:        nbdb.NATTypeSNAT,
 								LogicalPort: &node1NatLogicalPortName,
 								Options: map[string]string{
@@ -15394,7 +15322,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 		ginkgo.It("should handle EIP reassignment correctly on namespace label update", func() {
 			app.Action = func(*cli.Context) error {
 				config.Gateway.DisableSNATMultipleGWs = true
-				config.OVNKubernetesFeature.EnableInterconnect = true
 
 				egressIP := "192.168.126.101"
 				egressIP2 := "192.168.126.102"
@@ -15402,8 +15329,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4CIDR := node1IPv4 + "/24"
 				node1IPv4TranSwitchIP := "100.88.0.2/16"
 
-				egressPod := newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				egressNamespace.Labels["test"] = "dev2"
 				nodes := getIPv4Nodes([]nodeInfo{{[]string{node1IPv4CIDR}, "global", node1IPv4TranSwitchIP}})
 				node1 := nodes[0]
@@ -15476,7 +15403,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 		ginkgo.It("should handle EIP reassignment correctly on pod label update", func() {
 			app.Action = func(*cli.Context) error {
 				config.Gateway.DisableSNATMultipleGWs = true
-				config.OVNKubernetesFeature.EnableInterconnect = true
 
 				egressIP := "192.168.126.101"
 				egressIP2 := "192.168.126.102"
@@ -15485,8 +15411,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4TranSwitchIP := "100.88.0.2/16"
 
 				podLabel := map[string]string{"test": "dev2"}
-				egressPod := newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, podLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, podLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				nodes := getIPv4Nodes([]nodeInfo{{[]string{node1IPv4CIDR}, "global", node1IPv4TranSwitchIP}})
 				node1 := nodes[0]
 				node1.Labels = map[string]string{
@@ -15568,7 +15494,6 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 		ginkgo.It("should handle EIP reassignment correctly on EgressIP label update", func() {
 			app.Action = func(*cli.Context) error {
 				config.Gateway.DisableSNATMultipleGWs = true
-				config.OVNKubernetesFeature.EnableInterconnect = true
 
 				egressIP := "192.168.126.101"
 				egressIP2 := "192.168.126.102"
@@ -15576,8 +15501,8 @@ var _ = ginkgo.Describe("OVN master EgressIP Operations cluster default network"
 				node1IPv4CIDR := node1IPv4 + "/24"
 				node1IPv4TranSwitchIP := "100.88.0.2/16"
 
-				egressPod := newPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
-				egressNamespace := newNamespace(eipNamespace)
+				egressPod := ovntest.NewPodWithLabels(eipNamespace, podName, node1Name, podV4IP, egressPodLabel)
+				egressNamespace := ovntest.NewNamespace(eipNamespace)
 				egressNamespace.Labels["test"] = "dev2"
 				nodes := getIPv4Nodes([]nodeInfo{{[]string{node1IPv4CIDR}, "global", node1IPv4TranSwitchIP}})
 				node1 := nodes[0]
@@ -15722,10 +15647,20 @@ func getReRouteStaticRoute(clusterSubnet, nextHop string) *nbdb.LogicalRouterSta
 }
 
 func getNodeObj(nodeName string, annotations, labels map[string]string) corev1.Node {
+	nodeAnnotations := map[string]string{}
+	if annotations != nil {
+		nodeAnnotations = make(map[string]string, len(annotations)+1)
+		for k, v := range annotations {
+			nodeAnnotations[k] = v
+		}
+	}
+	if _, ok := nodeAnnotations[util.OvnNodeChassisID]; !ok {
+		nodeAnnotations[util.OvnNodeChassisID] = uuid.NewSHA1(uuid.NameSpaceOID, []byte(nodeName)).String()
+	}
 	return corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        nodeName,
-			Annotations: annotations,
+			Annotations: nodeAnnotations,
 			Labels:      labels,
 		},
 		Status: corev1.NodeStatus{
@@ -15754,7 +15689,7 @@ func getSwitchManagementPortIP(node *corev1.Node) (net.IP, error) {
 
 // returns the address set with externalID "k8s.ovn.org/name": "egresssvc-served-pods"
 func buildEgressServiceAddressSets(ips []string) (*nbdb.AddressSet, *nbdb.AddressSet) {
-	dbIDs := egresssvc.GetEgressServiceAddrSetDbIDs(DefaultNetworkControllerName)
+	dbIDs := egresssvc.GetEgressServiceAddrSetDbIDs(types.DefaultNetworkControllerName)
 	return addressset.GetTestDbAddrSets(dbIDs, ips)
 }
 
@@ -15767,6 +15702,20 @@ func buildEgressIPServedPodsAddressSets(ips []string, network, controller string
 
 // returns the address set with externalID "k8s.ovn.org/name": "node-ips"
 func buildEgressIPNodeAddressSets(ips []string) (*nbdb.AddressSet, *nbdb.AddressSet) {
-	dbIDs := getEgressIPAddrSetDbIDs(NodeIPAddrSetName, types.DefaultNetworkName, DefaultNetworkControllerName)
-	return addressset.GetTestDbAddrSets(dbIDs, ips)
+	return addressset.GetTestDbAddrSets(getClusterNodeIPsAddrSetDbIDsForTest(), ips)
+}
+
+func getDeprecatedEgressIPClusterNodeIPsAddrSetDbIDsForNetwork(network string) *libovsdbops.DbObjectIDs {
+	return libovsdbops.NewDbObjectIDs(libovsdbops.AddressSetEgressIP, types.DefaultNetworkControllerName,
+		map[libovsdbops.ExternalIDKey]string{
+			libovsdbops.ObjectNameKey: addresssetmanager.ClusterNodeIPsAddrSetName,
+			libovsdbops.NetworkKey:    network,
+		})
+}
+
+func getClusterNodeIPsAddrSetDbIDsForTest() *libovsdbops.DbObjectIDs {
+	return libovsdbops.NewDbObjectIDs(libovsdbops.AddressSetClusterNodeIPs, types.DefaultNetworkControllerName,
+		map[libovsdbops.ExternalIDKey]string{
+			libovsdbops.ObjectNameKey: addresssetmanager.ClusterNodeIPsAddrSetName,
+		})
 }

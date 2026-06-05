@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 // Contains helper functions for OVN
@@ -6,7 +9,7 @@ package util
 import (
 	ocpconfigapi "github.com/openshift/api/config/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
 )
 
 func PlatformTypeIsEgressIPCloudProvider() bool {

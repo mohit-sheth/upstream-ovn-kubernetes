@@ -54,15 +54,32 @@ with appropriate diagrams.
 
 ## How to enable this feature on an OVN-Kubernetes cluster?
 
-This feature is enabled by default on all OVN-Kubernetes clusters.
-You don't need to do anything extra to start using this feature.
-There is a Feature Config option `--enable-network-segmentation` under
-`OVNKubernetesFeatureConfig` config that can be used to disable this
-feature. However, note that disabling the feature will not remove
-existing CRs in the cluster. This feature has to be enabled along with
-the flag for multiple-networks `--enable-multi-network` since UDNs
-use Network Attachment Definitions as underlying implementation detail
-construct and reuse the user-defined network controllers.
+This feature is disabled by default. Enable it with the
+`--enable-network-segmentation` feature config option under
+`OVNKubernetesFeatureConfig`:
+
+```text
+--enable-network-segmentation=true
+--enable-multi-network=true
+```
+
+UDNs require both `--enable-network-segmentation` and
+`--enable-multi-network`. UDNs use NetworkAttachmentDefinitions as an
+underlying implementation detail and reuse the user-defined network
+controllers. Note that changing the feature configuration does not remove
+existing CRs in the cluster.
+
+Always check the dependencies on the [Requirements page](../requirements.md)
+
+## Performance/Scale Optimizations for UDN
+
+UDN scale is currently constrained to a couple of hundred UDNs when every UDN is
+rendered on every node in the cluster. If you need to scale beyond that, use the
+Dynamic UDN feature which can reduce per-node OVN-Kubernetes workload, avoid
+unused per-node UDN state, and avoid per-node allocations until resources that
+need the UDN are scheduled on that node.
+See the [Dynamic UDN feature page](dynamic-udn.md) for enablement,
+observability, and limitations.
 
 ## Workflow Description
 
@@ -124,6 +141,7 @@ of end users. Currently supported topology types for a given network include:
 `Layer3`: is a topology type wherein the pods or VMs are connected to their
 node’s local router and all these routers are then connected to the distributed
 switch across nodes.
+
   * Each pod would hence get an IP from the node's subnet segment
   * When in doubt which topology to use go with layer3 which is the same topology
     as the cluster default network
@@ -142,6 +160,7 @@ network (grey color) which is only used for kubelet healthchecks.
 
 `Layer2`: is a topology type wherein the pods or VMs are all connected to the
 same layer2 flat switch.
+
   * Usually used when the applications deployed expect a layer2 type network
     connection (Perhaps applications want a single broadcast domain, latency sensitive, use proprietary L2 protocols)
   * Common in Virtualization world for seamless migration of the VM since
@@ -149,7 +168,7 @@ same layer2 flat switch.
     during live migration
   * Can be of type `primary` or `secondary`
 
-![l2-UDN](images/L2DeepDive-2segments.png)
+![l2-UDN](images/L2DeepDive-2segments.jpg)
 
 Here we can see a blue and green P-UDN. On node1, pod1 is part of green UDN and
 pod2 is part of blue UDN. They each have a udn-0 interface that is attached to
@@ -160,6 +179,7 @@ network (grey color) which is only used for kubelet healthchecks.
 
 `Localnet`: is a topology type wherein the pods or VMs attached to a localnet
 network on the overlay can egress to the provider’s physical network
+
   * without SNATing to nodeIPs… preserves the podIPs
   * podIPs can be on the same subnet as the provider’s VLAN
   * VLAN IDs can be used to mark the traffic coming from the localnet for

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package pod
 
 import (
@@ -16,16 +19,16 @@ import (
 	ref "k8s.io/client-go/tools/reference"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	ipallocator "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/mac"
-	podallocator "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/pod"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/persistentips"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	ipallocator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	podallocator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/pod"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/persistentips"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // PodAllocator acts on pods events handed off by the cluster network controller
@@ -113,10 +116,16 @@ func (a *PodAllocator) Init() error {
 func (a *PodAllocator) getActiveNetworkForPod(pod *corev1.Pod) (util.NetInfo, error) {
 	activeNetwork, err := a.networkManager.GetActiveNetworkForNamespace(pod.Namespace)
 	if err != nil {
-		if util.IsUnprocessedActiveNetworkError(err) {
+		if util.IsInvalidPrimaryNetworkError(err) {
 			a.recordPodErrorEvent(pod, err)
 		}
 		return nil, err
+	}
+	// Cluster manager pod allocation should always have an active network
+	if activeNetwork == nil {
+		newErr := fmt.Errorf("no active network found for pod %s/%s", pod.Namespace, pod.Name)
+		a.recordPodErrorEvent(pod, newErr)
+		return nil, newErr
 	}
 	return activeNetwork, nil
 
@@ -124,9 +133,14 @@ func (a *PodAllocator) getActiveNetworkForPod(pod *corev1.Pod) (util.NetInfo, er
 
 // GetNetworkRole returns the role of this controller's network for the given pod
 func (a *PodAllocator) GetNetworkRole(pod *corev1.Pod) (string, error) {
-	role, err := util.GetNetworkRole(a.netInfo, a.networkManager.GetActiveNetworkForNamespace, pod)
+	role, err := util.GetNetworkRole(
+		a.netInfo,
+		a.networkManager.GetPrimaryNADForNamespace,
+		a.networkManager.GetNetworkNameForNADKey,
+		pod,
+	)
 	if err != nil {
-		if util.IsUnprocessedActiveNetworkError(err) {
+		if util.IsInvalidPrimaryNetworkError(err) {
 			a.recordPodErrorEvent(pod, err)
 		}
 		return "", err
@@ -201,7 +215,8 @@ func (a *PodAllocator) reconcile(old, new *corev1.Pod, releaseFromAllocator bool
 			return err
 		}
 		for nadKey := range podNetworks {
-			if a.netInfo.HasNADKey(nadKey) {
+			networkName := a.networkManager.GetNetworkNameForNADKey(nadKey)
+			if networkName != "" && networkName == a.netInfo.GetNetworkName() {
 				activeNetwork = a.netInfo
 				break
 			}
@@ -212,7 +227,13 @@ func (a *PodAllocator) reconcile(old, new *corev1.Pod, releaseFromAllocator bool
 		}
 	}
 
-	onNetwork, networkMap, err := util.GetPodNADToNetworkMappingWithActiveNetwork(pod, a.netInfo, activeNetwork)
+	onNetwork, networkMap, err := util.GetPodNADToNetworkMappingWithActiveNetwork(
+		pod,
+		a.netInfo,
+		activeNetwork,
+		a.networkManager.GetNetworkNameForNADKey,
+		a.networkManager.GetPrimaryNADForNamespace,
+	)
 	if err != nil {
 		a.recordPodErrorEvent(pod, err)
 		return fmt.Errorf("failed to get NAD to network mapping: %w", err)

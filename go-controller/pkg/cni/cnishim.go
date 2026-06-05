@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 // contains code for cnishim - one that gets called as the cni Plugin
@@ -19,7 +22,7 @@ import (
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	current "github.com/containernetworking/cni/pkg/types/100"
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	lumberjack "gopkg.in/natefinch/lumberjack.v2"
@@ -30,9 +33,9 @@ import (
 	"k8s.io/klog/v2"
 	kexec "k8s.io/utils/exec"
 
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // Plugin is the structure to hold the endpoint information and the corresponding
@@ -98,13 +101,17 @@ func (p *Plugin) doCNI(url string, req interface{}) ([]byte, error) {
 	}
 
 	if resp.StatusCode != 200 {
+		var cniErr cnitypes.Error
+		if err := json.Unmarshal(body, &cniErr); err == nil && cniErr.Code != 0 {
+			return nil, &cniErr
+		}
 		return nil, fmt.Errorf("CNI request failed with status %v: '%s'", resp.StatusCode, string(body))
 	}
 
 	return body, nil
 }
 
-func setupLogging(conf *ovntypes.NetConf) {
+func setupLogging(conf *ovncnitypes.NetConf) {
 	var err error
 	var level klog.Level
 
@@ -241,13 +248,14 @@ func (p *Plugin) CmdAdd(args *skel.CmdArgs) error {
 		// plugging an interface into Pod is on the Shim.
 
 		// Use the IPAM details from ovnkube-node to configure the pod interface
-		pr, err := cniRequestToPodRequest(req)
+		ctx, cancel := context.WithTimeout(context.Background(), kubeletDefaultCRIOperationTimeout)
+		defer cancel()
+		pr, err := cniRequestToPodRequest(req, ctx)
 		if err != nil {
 			err = fmt.Errorf("failed to create pod request: %v", err)
 			klog.Error(err.Error())
 			return err
 		}
-		defer pr.cancel()
 
 		if !response.PodIFInfo.IsDPUHostMode {
 			// Initialize OVS exec runner; find OVS binaries that the CNI code uses.
@@ -267,17 +275,18 @@ func (p *Plugin) CmdAdd(args *skel.CmdArgs) error {
 		}
 		if response.PrimaryUDNPodInfo != nil {
 			primaryUDNPodRequest := response.PrimaryUDNPodReq
-			primaryUDNPodRequest.ctx, primaryUDNPodRequest.cancel = context.WithCancel(pr.ctx)
-			defer primaryUDNPodRequest.cancel()
-			err = primaryUDNCmdAddGetCNIResultFunc(result, getCNIResult, primaryUDNPodRequest, clientset, response.PrimaryUDNPodInfo)
+			primaryUDNPodRequest.ctx = ctx
+
+			primaryUDNResult, err := getCNIResult(primaryUDNPodRequest, clientset, response.PrimaryUDNPodInfo)
 			if err != nil {
 				klog.Error(err.Error())
 				return err
 			}
+			mergePrimaryUDNResponse(&Response{Result: result}, &Response{Result: primaryUDNResult}, primaryUDNPodRequest)
 		}
 	}
 
-	return types.PrintResult(result, conf.CNIVersion)
+	return cnitypes.PrintResult(result, conf.CNIVersion)
 }
 
 // CmdDel is the callback for 'teardown' cni calls from skel
@@ -285,7 +294,7 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 	var err error
 	var body []byte
 	var pr *PodRequest
-	var conf *ovntypes.NetConf
+	var conf *ovncnitypes.NetConf
 
 	startTime := time.Now()
 	defer func() {
@@ -318,12 +327,13 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 
 	// if Result is nil, then ovnkube-node is running in unprivileged mode so unconfigure the Interface from here.
 	if response.Result == nil {
-		pr, err = cniRequestToPodRequest(req)
+		ctx, cancel := context.WithTimeout(context.Background(), kubeletDefaultCRIOperationTimeout)
+		defer cancel()
+		pr, err = cniRequestToPodRequest(req, ctx)
 		if err != nil {
 			err = fmt.Errorf("failed to create pod request: %v", err)
 			return err
 		}
-		defer pr.cancel()
 
 		if !response.PodIFInfo.IsDPUHostMode {
 			// Initialize OVS exec runner; find OVS binaries that the CNI code uses.
@@ -337,6 +347,51 @@ func (p *Plugin) CmdDel(args *skel.CmdArgs) error {
 		err = podRequestInterfaceOps.UnconfigureInterface(pr, response.PodIFInfo)
 	}
 	return err
+}
+
+// CmdStatus is the callback for plugin readiness checks
+func (p *Plugin) CmdStatus(args *skel.CmdArgs) error {
+	var err error
+
+	startTime := time.Now()
+	defer func() {
+		p.postMetrics(startTime, CNIStatus, err)
+		if err != nil {
+			klog.Errorf("Error on CmdStatus: %v", err)
+		}
+	}()
+
+	conf, err := config.ReadCNIConfig(args.StdinData)
+	if err != nil {
+		return err
+	}
+	setupLogging(conf)
+
+	req := newCNIRequest(args, nadapi.DeviceInfo{})
+	_, err = p.doCNIFunc("http://dummy/", req)
+	return err
+}
+
+// CmdGC is the callback for runtime garbage collection.
+func (p *Plugin) CmdGC(args *skel.CmdArgs) error {
+	var err error
+
+	startTime := time.Now()
+	defer func() {
+		p.postMetrics(startTime, CNIGC, err)
+		if err != nil {
+			klog.Errorf("Error on CmdGC: %v", err)
+		}
+	}()
+
+	conf, err := config.ReadCNIConfig(args.StdinData)
+	if err != nil {
+		return err
+	}
+	setupLogging(conf)
+
+	// OVN-Kubernetes does not maintain independent local plugin state that needs GC.
+	return nil
 }
 
 // CmdCheck is the callback for 'checking' container's networking is as expected.

@@ -1,13 +1,35 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ops
 
 import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 )
 
 type coppPredicate func(*nbdb.Copp) bool
+
+// GetCOPP looks up a COPP from the cache
+func GetCOPP(nbClient libovsdbclient.Client, copp *nbdb.Copp) (*nbdb.Copp, error) {
+	found := []*nbdb.Copp{}
+	opModel := operationModel{
+		Model:          copp,
+		ExistingResult: &found,
+		ErrNotFound:    true,
+		BulkOp:         false,
+	}
+
+	m := newModelClient(nbClient)
+	err := m.Lookup(opModel)
+	if err != nil {
+		return nil, err
+	}
+
+	return found[0], nil
+}
 
 // CreateOrUpdateCOPPsOps creates or updates the provided COPP returning the
 // corresponding ops

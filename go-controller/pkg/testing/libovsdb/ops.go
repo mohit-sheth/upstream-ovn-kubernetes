@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package libovsdb
 
 import (
@@ -8,7 +11,7 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
 )
 
 func CreateTransitSwitchPortBindings(sbClient libovsdbclient.Client, datapath string, names ...string) error {

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package recorders
 
 import (
@@ -16,10 +19,10 @@ import (
 	"github.com/ovn-kubernetes/libovsdb/model"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 const (
@@ -143,7 +146,7 @@ var metricNetworkProgrammingOVN = prometheus.NewHistogram(prometheus.HistogramOp
 		prometheus.LinearBuckets(120, 30, 11))}, // 2min, 2.5min, 3min, ..., 7min
 )
 
-// Run monitors the config duration for OVN-Kube master to configure k8 kinds. A measurement maybe allowed and this is
+// Run monitors the config duration for the ovnkube control plane to configure k8s kinds. A measurement maybe allowed and this is
 // related to the number of k8 nodes, N [1] and by argument k [2] where there is a probability that 1 out of N*k
 // measurement attempts are allowed. If k=0, all measurements are allowed. mUpdatePeriod determines the period to
 // process and publish metrics

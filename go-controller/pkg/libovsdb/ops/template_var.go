@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ops
 
 import (
@@ -6,8 +9,8 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 )
 
 type chassisTemplateVarPredicate func(*nbdb.ChassisTemplateVar) bool
@@ -51,13 +54,16 @@ func deleteChassisTemplateVarVariablesOps(nbClient libovsdbclient.Client,
 		deleteTemplate.Variables[name] = ""
 	}
 	modelClient := newModelClient(nbClient)
-	return modelClient.DeleteOps(ops, operationModel{
+	opModel := operationModel{
 		Model:            deleteTemplate,
-		ModelPredicate:   predicate,
 		OnModelMutations: []interface{}{&deleteTemplate.Variables},
 		ErrNotFound:      false,
 		BulkOp:           true,
-	})
+	}
+	if predicate != nil {
+		opModel.ModelPredicate = predicate
+	}
+	return modelClient.DeleteOps(ops, opModel)
 }
 
 // DeleteChassisTemplateVarVariablesOps removes all variables listed as

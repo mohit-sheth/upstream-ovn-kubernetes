@@ -12,6 +12,8 @@ The feature is supported fully by "Local" gateway mode and almost entirely by "S
 
 Announcing the service externally (for ingress traffic) is handled by a LoadBalancer provider (like MetalLB) and not by OVN-Kubernetes as explained later.
 
+Always check the dependencies on the [Requirements page](../requirements.md)
+
 ## Details - Modifying the source IP of the egress packets
 
 Only SNATing a pod's IP to the LoadBalancer service ingress IP that it is backing is problematic, as usually the ingress IP is exposed via multiple nodes by the LoadBalancer provider. This means we can't just add an SNAT to the regular traffic flow of a pod before it exits its node because we don't have a guarantee that the reply will come back to the pod's node (where the traffic originated).
@@ -80,7 +82,7 @@ Assuming an Egress Service has `172.19.0.100` as its ingress IP and `ovn-worker`
 ```
 Notice how the packet exits `ovn-worker`'s eth1 and not breth0, as the packet goes through the host's routing table regardless of the gateway mode.
 
-When `sourceIPBy: "Network"` is set, `ovnkube-master` does not need to create any logical router policies because the egress packets of each pod would exit through the pod's node but will set the status field of the resource with `host: ALL` as decribed later.
+When `sourceIPBy: "Network"` is set, `ovnkube-controller` does not need to create any logical router policies because the egress packets of each pod would exit through the pod's node, and `ovnkube-cluster-manager` will set the status field of the resource with `host: ALL` as described later.
 
 ### Network
 The `EgressService` supports a `network` field to specify to which network the egress traffic of the service should be steered to.
@@ -106,8 +108,8 @@ An EgressService with `sourceIPBy: "Network"` does not need to have a host selec
 
 This works only on clusters running on "Local" gateway mode, because on "Shared" gateway mode the ip rules created by the controller are ignored (like all the node's routing stack).
 
-When `sourceIPBy: "Network"`, `ovnkube-master` does not need to create any logical router policies as the egress packets of each pod would exit through the pod's node.
-However, `ovnkube-master` will set the status field of the resource with `host: ALL` to designate that no reroute logical router policies exist for the service, "instructing" all of the `ovnkube-nodes` to handle the resource's `Network` field without creating SNAT iptables rules.
+When `sourceIPBy: "Network"`, `ovnkube-controller` does not need to create any logical router policies as the egress packets of each pod would exit through the pod's node.
+However, `ovnkube-cluster-manager` will set the status field of the resource with `host: ALL` to designate that no reroute logical router policies exist for the service, "instructing" all of the `ovnkube-nodes` to handle the resource's `Network` field without creating SNAT iptables rules.
 
 When `ovnkube-node` detects that the host of an EgressService is `ALL`, only the endpoints local to the node will have an ip rule created, and no SNAT iptables rules will be created.
 

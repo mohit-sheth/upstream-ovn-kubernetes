@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package services
 
 import (
@@ -11,9 +14,9 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const LBVipNodeTemplate string = "NODEIP"
@@ -68,6 +71,20 @@ func makeTemplateName(name string) string {
 // makeTemplate intializes a named Template struct with 0 values.
 func makeTemplate(name string) *Template {
 	return &Template{Name: name, Value: map[string]string{}}
+}
+
+// appendTemplateValue appends a comma-separated value to a template's
+// per-chassis entry. This is used when accumulating targets across
+// multiple port numbers into a single template.
+func appendTemplateValue(t *Template, chassisID, value string) {
+	if value == "" {
+		return
+	}
+	if existing := t.Value[chassisID]; existing != "" {
+		t.Value[chassisID] = existing + "," + value
+	} else {
+		t.Value[chassisID] = value
+	}
 }
 
 func forEachNBTemplateInMaps(templateMaps []TemplateMap, callback func(nbTemplate *nbdb.ChassisTemplateVar) bool) {

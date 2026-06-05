@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -10,7 +13,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,10 +28,10 @@ import (
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/deploymentconfig"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
-	infraapi "github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
 )
 
 const (
@@ -2335,10 +2338,6 @@ ip a add %[4]s/24 dev %[2]s
 				Expect(err).NotTo(HaveOccurred())
 			}
 
-			By("sitting on our hands for a couple secs we give the controller time to sync all NADs before provisioning policies and pods")
-			// TODO: this is temporary. We hope to eventually sync pods & multi-net policies on NAD C/U/D ops
-			time.Sleep(3 * time.Second)
-
 			podConfig := podConfiguration{
 				attachments: []nadapi.NetworkSelectionElement{
 					{Name: secondaryNetworkName},
@@ -2399,6 +2398,14 @@ ip a add %[4]s/24 dev %[2]s
 				netConfig.namespace = f.Namespace.Name
 				netConfig.name = testNadName
 
+				if netConfig.topology == "localnet" {
+					By("setting up the localnet underlay")
+					Expect(providerCtx.SetupUnderlay(f, infraapi.Underlay{
+						LogicalNetworkName: netConfig.networkName,
+						VlanID:             netConfig.vlanID,
+					})).To(Succeed())
+				}
+
 				By("creating the secondary network attachment definition")
 				_, err := nadClient.NetworkAttachmentDefinitions(netConfig.namespace).Create(
 					context.Background(),
@@ -2406,9 +2413,6 @@ ip a add %[4]s/24 dev %[2]s
 					metav1.CreateOptions{},
 				)
 				Expect(err).NotTo(HaveOccurred())
-
-				By("waiting for controller to sync the NAD")
-				time.Sleep(5 * time.Second)
 
 				By("creating a pod with multiple attachments to the same secondary NAD")
 				// Specify the same NAD name multiple times to test GetIndexedNADKey functionality
@@ -2705,6 +2709,15 @@ ip a add %[4]s/24 dev %[2]s
 					role:     "secondary",
 				},
 			),
+			Entry("Localnet secondary NAD",
+				networkAttachmentConfigParams{
+					name:     testNadName,
+					topology: "localnet",
+					cidr:     secondaryLocalnetNetworkCIDR,
+					vlanID:   localnetVLANID,
+					role:     "secondary",
+				},
+			),
 		)
 	})
 })
@@ -2749,10 +2762,6 @@ func createNads(f *framework.Framework, nadClient nadclient.K8sCniCncfIoV1Interf
 			return err
 		}
 	}
-
-	By("sitting on our hands for a couple secs we give the controller time to sync all NADs before provisioning policies and pods")
-	// TODO: this is temporary. We hope to eventually sync pods & multi-net policies on NAD C/U/D ops
-	time.Sleep(3 * time.Second)
 
 	return nil
 }

@@ -1,15 +1,18 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
 	"os"
 
 	"github.com/containernetworking/cni/pkg/skel"
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
 	"github.com/urfave/cli/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni"
 )
 
 func main() {
@@ -22,9 +25,11 @@ func main() {
 	c.Action = func(_ *cli.Context) error {
 		skel.PluginMainFuncs(
 			skel.CNIFuncs{
-				Add:   p.CmdAdd,
-				Check: p.CmdCheck,
-				Del:   p.CmdDel,
+				Add:    p.CmdAdd,
+				Check:  p.CmdCheck,
+				Del:    p.CmdDel,
+				GC:     p.CmdGC,
+				Status: p.CmdStatus,
 			},
 			version.All,
 			bv.BuildString("ovn-k8s-cni-overlay"))
@@ -33,9 +38,9 @@ func main() {
 
 	if err := c.Run(os.Args); err != nil {
 		// Print the error to stdout in conformance with the CNI spec
-		e, ok := err.(*types.Error)
+		e, ok := err.(*cnitypes.Error)
 		if !ok {
-			e = &types.Error{Code: 100, Msg: err.Error()}
+			e = &cnitypes.Error{Code: 100, Msg: err.Error()}
 		}
 		e.Print()
 	}

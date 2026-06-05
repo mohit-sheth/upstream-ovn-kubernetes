@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package api
 
 // DeploymentConfig offers visibility into the configuration OVN-Kubernetes environment for e2e test cases. This includes all host or node level config.
@@ -7,4 +10,5 @@ type DeploymentConfig interface {
 	FRRK8sNamespace() string
 	ExternalBridgeName() string
 	PrimaryInterfaceName() string
+	GetAgnHostContainerImage() string
 }

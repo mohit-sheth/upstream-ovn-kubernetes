@@ -1,31 +1,21 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package kind
 
 import (
-	"fmt"
-	"os/exec"
-	"strings"
+	"k8s.io/kubernetes/test/utils/image"
 
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/deploymentconfig/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
 )
-
-func IsKind() bool {
-	_, err := exec.LookPath("kind")
-	if err != nil {
-		return false
-	}
-	outBytes, err := exec.Command("kind", "get", "clusters").CombinedOutput()
-	if err != nil {
-		panic(fmt.Sprintf("failed to get KinD clusters: stdout: %q, err: %v", string(outBytes), err))
-	}
-	if strings.Contains(string(outBytes), "ovn") {
-		return true
-	}
-	return false
-}
 
 type kind struct{}
 
 func New() api.DeploymentConfig {
+	if !infraprovider.IsKind() {
+		panic("Cluster provider must be KinD type")
+	}
 	return kind{}
 }
 
@@ -43,4 +33,8 @@ func (k kind) ExternalBridgeName() string {
 
 func (k kind) PrimaryInterfaceName() string {
 	return "eth0"
+}
+
+func (k kind) GetAgnHostContainerImage() string {
+	return image.GetE2EImage(image.Agnhost)
 }

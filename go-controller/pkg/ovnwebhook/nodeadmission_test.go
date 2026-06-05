@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovnwebhook
 
 import (
@@ -12,46 +15,39 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/csrapprover"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	hotypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/csrapprover"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func TestNewNodeAdmissionWebhook(t *testing.T) {
-	icAnnotations := make(map[string]checkNodeAnnot)
-	maps.Copy(icAnnotations, commonNodeAnnotationChecks)
-	maps.Copy(icAnnotations, interconnectNodeAnnotationChecks)
+	defaultAnnotations := make(map[string]checkNodeAnnot)
+	maps.Copy(defaultAnnotations, commonNodeAnnotationChecks)
+	maps.Copy(defaultAnnotations, interconnectNodeAnnotationChecks)
 	hoAnnotations := make(map[string]checkNodeAnnot)
-	maps.Copy(hoAnnotations, commonNodeAnnotationChecks)
+	maps.Copy(hoAnnotations, defaultAnnotations)
 	maps.Copy(hoAnnotations, hybridOverlayNodeAnnotationChecks)
 	tests := []struct {
 		name                string
-		enableInterconnect  bool
 		enableHybridOverlay bool
 
 		expectedKeys []string
 	}{
 		{
-			name:         "should only contain common annotation in non-IC",
-			expectedKeys: maps.Keys(commonNodeAnnotationChecks),
+			name:         "should contain common and interconnect annotations",
+			expectedKeys: maps.Keys(defaultAnnotations),
 		},
 		{
-			name:               "should contain common and IC annotations in IC",
-			enableInterconnect: true,
-			expectedKeys:       maps.Keys(icAnnotations),
-		},
-		{
-			name:                "should contain common and hybrid overlay annotations in hybrid overlay ",
+			name:                "should contain common, interconnect, and hybrid overlay annotations in hybrid overlay",
 			enableHybridOverlay: true,
 			expectedKeys:        maps.Keys(hoAnnotations),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewNodeAdmissionWebhook(tt.enableInterconnect, tt.enableHybridOverlay); !got.annotationKeys.HasAll(tt.expectedKeys...) {
+			if got := NewNodeAdmissionWebhook(tt.enableHybridOverlay); !got.annotationKeys.HasAll(tt.expectedKeys...) {
 				t.Errorf("NewNodeAdmissionWebhook() = %v, want %v", got.annotationKeys, tt.expectedKeys)
 			}
 		})
@@ -64,12 +60,12 @@ var additionalNamePrefix = "system:foobar"
 var additionalUserName = fmt.Sprintf("%s:%s", additionalNamePrefix, nodeName)
 
 func TestNodeAdmission_ValidateUpdate(t *testing.T) {
-	adm := NewNodeAdmissionWebhook(false, false)
+	adm := NewNodeAdmissionWebhook(false)
 	tests := []struct {
 		name        string
 		ctx         context.Context
-		oldObj      runtime.Object
-		newObj      runtime.Object
+		oldObj      *corev1.Node
+		newObj      *corev1.Node
 		expectedErr error
 	}{
 		{
@@ -403,54 +399,13 @@ func TestNodeAdmission_ValidateUpdate(t *testing.T) {
 		})
 	}
 }
-func TestNodeAdmission_ValidateUpdateIC(t *testing.T) {
-	adm := NewNodeAdmissionWebhook(true, false)
-	tests := []struct {
-		name        string
-		ctx         context.Context
-		oldObj      runtime.Object
-		newObj      runtime.Object
-		expectedErr error
-	}{
-		{
-			name: "ovnkube-node cannot set util.OvnNodeMigratedZoneName to anything else than <nodeName>",
-			ctx: admission.NewContextWithRequest(context.TODO(), admission.Request{
-				AdmissionRequest: v1.AdmissionRequest{UserInfo: authenticationv1.UserInfo{
-					Username: userName,
-				}},
-			}),
-			oldObj: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: nodeName,
-				},
-			},
-			newObj: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        nodeName,
-					Annotations: map[string]string{util.OvnNodeMigratedZoneName: "global"},
-				},
-			},
-			expectedErr: fmt.Errorf("user: %q is not allowed to set %s on node %q: %s can only be set to %s, it cannot be removed", userName, util.OvnNodeMigratedZoneName, nodeName, util.OvnNodeMigratedZoneName, nodeName),
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := adm.ValidateUpdate(tt.ctx, tt.oldObj, tt.newObj)
-			if err != tt.expectedErr && err.Error() != tt.expectedErr.Error() {
-				t.Errorf("ValidateUpdateIC() error = %v, wantErr %v", err, tt.expectedErr)
-				return
-			}
-		})
-	}
-}
-
 func TestNodeAdmission_ValidateUpdateHybridOverlay(t *testing.T) {
-	adm := NewNodeAdmissionWebhook(false, true)
+	adm := NewNodeAdmissionWebhook(true)
 	tests := []struct {
 		name        string
 		ctx         context.Context
-		oldObj      runtime.Object
-		newObj      runtime.Object
+		oldObj      *corev1.Node
+		newObj      *corev1.Node
 		expectedErr error
 	}{
 		{
@@ -488,67 +443,6 @@ func TestNodeAdmission_ValidateUpdateHybridOverlay(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:        nodeName,
 					Annotations: map[string]string{hotypes.HybridOverlayDRIP: "192.168.0.3"},
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := adm.ValidateUpdate(tt.ctx, tt.oldObj, tt.newObj)
-			if err != tt.expectedErr && err.Error() != tt.expectedErr.Error() {
-				t.Errorf("ValidateUpdateIC() error = %v, wantErr %v", err, tt.expectedErr)
-				return
-			}
-		})
-	}
-}
-
-func TestNodeAdmission_ValidateUpdateExtraUsers(t *testing.T) {
-	extraUser := "system:serviceaccount:ovnkube-cluster-manager"
-	adm := NewNodeAdmissionWebhook(true, false, extraUser)
-	tests := []struct {
-		name        string
-		ctx         context.Context
-		oldObj      runtime.Object
-		newObj      runtime.Object
-		expectedErr error
-	}{
-		{
-			name: "extra user cannot set util.OvnNodeMigratedZoneName to anything else than <nodeName>",
-			ctx: admission.NewContextWithRequest(context.TODO(), admission.Request{
-				AdmissionRequest: v1.AdmissionRequest{UserInfo: authenticationv1.UserInfo{
-					Username: extraUser,
-				}},
-			}),
-			oldObj: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: nodeName,
-				},
-			},
-			newObj: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        nodeName,
-					Annotations: map[string]string{util.OvnNodeMigratedZoneName: "global"},
-				},
-			},
-			expectedErr: fmt.Errorf("user: %q is not allowed to set %s on node %q: %s can only be set to %s, it cannot be removed", extraUser, util.OvnNodeMigratedZoneName, nodeName, util.OvnNodeMigratedZoneName, nodeName),
-		},
-		{
-			name: "extra user can set util.OvnNodeMigratedZoneName to <nodeName>",
-			ctx: admission.NewContextWithRequest(context.TODO(), admission.Request{
-				AdmissionRequest: v1.AdmissionRequest{UserInfo: authenticationv1.UserInfo{
-					Username: extraUser,
-				}},
-			}),
-			oldObj: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: nodeName,
-				},
-			},
-			newObj: &corev1.Node{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:        nodeName,
-					Annotations: map[string]string{util.OvnNodeMigratedZoneName: nodeName},
 				},
 			},
 		},

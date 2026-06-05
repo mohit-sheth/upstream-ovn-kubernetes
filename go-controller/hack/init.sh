@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 
 OUT_DIR=${OUT_DIR:-_output}
 
@@ -12,7 +15,7 @@ export GO111MODULE=on
 function setup_env() {
     init_source="$( dirname "${BASH_SOURCE}" )/.."
     OVN_KUBE_ROOT="$( absolute_path "${init_source}" )"
-    OVN_KUBE_GO_PACKAGE="github.com/ovn-org/ovn-kubernetes/go-controller"
+    OVN_KUBE_GO_PACKAGE="github.com/ovn-kubernetes/ovn-kubernetes/go-controller"
     OVN_KUBE_OUTPUT=${OVN_KUBE_ROOT}/${OUT_DIR}
 
     if [[ -z "$(command -v go)" ]]; then

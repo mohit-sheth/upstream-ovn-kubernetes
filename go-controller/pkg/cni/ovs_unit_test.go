@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
@@ -9,8 +12,8 @@ import (
 
 	kexec "k8s.io/utils/exec"
 
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	mock_k8s_io_utils_exec "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/utils/exec"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	mock_k8s_io_utils_exec "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/utils/exec"
 )
 
 func TestSetExec(t *testing.T) {

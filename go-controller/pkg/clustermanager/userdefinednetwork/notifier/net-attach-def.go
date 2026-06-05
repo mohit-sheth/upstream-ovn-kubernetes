@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package notifier
 
 import (
@@ -6,7 +9,7 @@ import (
 
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
 )
 
 type NetAttachDefReconciler interface {

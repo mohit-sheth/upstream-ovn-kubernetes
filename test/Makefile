@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 E2E_REPORT_DIR:=$(CURDIR)/_artifacts
 JOB_NAME?="$@"
 
@@ -12,6 +15,10 @@ DUALSTACK_CONVERSION?=false
 COREDUMP_DIR?=/tmp/kind/logs/coredumps
 # Processes to skip when checking for coredumps (pipe-separated for grep)
 # https://github.com/ovn-kubernetes/ovn-kubernetes/issues/5782
+# https://github.com/ovn-kubernetes/ovn-kubernetes/issues/6299
+#
+# Don't remove this skip until we trust frr enough not to puke coredumps that
+# often.
 SKIPPED_COREDUMPS?=zebra|bgpd|mgmtd|bfdd
 
 # Check for coredumps and fail if any are found (excluding skipped processes)

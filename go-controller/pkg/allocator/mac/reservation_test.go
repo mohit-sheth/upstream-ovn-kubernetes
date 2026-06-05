@@ -1,10 +1,13 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package mac_test
 
 import (
 	"fmt"
 	"net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

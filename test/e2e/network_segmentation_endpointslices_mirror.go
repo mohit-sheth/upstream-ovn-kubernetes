@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -5,10 +8,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/feature"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
 
 	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	. "github.com/onsi/ginkgo/v2"
@@ -93,7 +96,7 @@ var _ = Describe("Network Segmentation EndpointSlices mirroring", feature.Networ
 
 						By("asserting the mirrored EndpointSlice exists and contains PODs primary IPs")
 						Eventually(func() error {
-							return validateMirroredEndpointSlices(cs, f.Namespace.Name, svc.Name, userDefinedNetworkIPv4Subnet, userDefinedNetworkIPv6Subnet, hostSubnets, int(replicas), isDualStack, isHostNetwork)
+							return validateMirroredEndpointSlices(cs, f.Namespace.Name, svc.Name, netConfig.cidr, hostSubnets, int(replicas), isDualStack, isHostNetwork)
 
 						}, 2*time.Minute, 6*time.Second).ShouldNot(HaveOccurred())
 
@@ -101,7 +104,7 @@ var _ = Describe("Network Segmentation EndpointSlices mirroring", feature.Networ
 						err = cs.DiscoveryV1().EndpointSlices(f.Namespace.Name).DeleteCollection(context.TODO(), metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", "k8s.ovn.org/service-name", svc.Name)})
 						framework.ExpectNoError(err, "Failed removing the mirrored EndpointSlice %v", err)
 						Eventually(func() error {
-							return validateMirroredEndpointSlices(cs, f.Namespace.Name, svc.Name, userDefinedNetworkIPv4Subnet, userDefinedNetworkIPv6Subnet, hostSubnets, int(replicas), isDualStack, isHostNetwork)
+							return validateMirroredEndpointSlices(cs, f.Namespace.Name, svc.Name, netConfig.cidr, hostSubnets, int(replicas), isDualStack, isHostNetwork)
 						}, 2*time.Minute, 6*time.Second).ShouldNot(HaveOccurred())
 
 						By("removing the service so both EndpointSlices get removed")
@@ -135,7 +138,7 @@ var _ = Describe("Network Segmentation EndpointSlices mirroring", feature.Networ
 						networkAttachmentConfigParams{
 							name:     nadName,
 							topology: "layer3",
-							cidr:     joinStrings(userDefinedNetworkIPv4Subnet, userDefinedNetworkIPv6Subnet),
+							cidr:     primaryLayer3MultiCIDRs(),
 							role:     "primary",
 						},
 						false,
@@ -155,7 +158,7 @@ var _ = Describe("Network Segmentation EndpointSlices mirroring", feature.Networ
 						networkAttachmentConfigParams{
 							name:     nadName,
 							topology: "layer3",
-							cidr:     joinStrings(userDefinedNetworkIPv4Subnet, userDefinedNetworkIPv6Subnet),
+							cidr:     primaryLayer3MultiCIDRs(),
 							role:     "primary",
 						},
 						true,
@@ -265,7 +268,7 @@ var _ = Describe("Network Segmentation EndpointSlices mirroring", feature.Networ
 	})
 })
 
-func validateMirroredEndpointSlices(cs clientset.Interface, namespace, svcName, expectedV4Subnet, expectedV6Subnet string, hostSubnet *util.ParsedNodeEgressIPConfiguration, expectedEndpoints int, isDualStack, isHostNetwork bool) error {
+func validateMirroredEndpointSlices(cs clientset.Interface, namespace, svcName, expectedSubnets string, hostSubnet *util.ParsedNodeEgressIPConfiguration, expectedEndpoints int, isDualStack, isHostNetwork bool) error {
 	esList, err := cs.DiscoveryV1().EndpointSlices(namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: fmt.Sprintf("%s=%s", "k8s.ovn.org/service-name", svcName)})
 	if err != nil {
 		return err
@@ -284,13 +287,12 @@ func validateMirroredEndpointSlices(cs clientset.Interface, namespace, svcName, 
 			return fmt.Errorf("expected %d endpoints, got: %d", expectedEndpoints, len(esList.Items))
 		}
 
-		subnet := expectedV4Subnet
+		subnet := expectedSubnets
 		if isHostNetwork {
 			subnet = hostSubnet.V4.Net.String()
 		}
 
 		if endpointSlice.AddressType == discoveryv1.AddressTypeIPv6 {
-			subnet = expectedV6Subnet
 			if isHostNetwork {
 				subnet = hostSubnet.V6.Net.String()
 			}
@@ -299,7 +301,7 @@ func validateMirroredEndpointSlices(cs clientset.Interface, namespace, svcName, 
 			if len(endpoint.Addresses) != 1 {
 				return fmt.Errorf("expected 1 endpoint, got: %d", len(endpoint.Addresses))
 			}
-			if err := inRange(subnet, endpoint.Addresses[0]); err != nil {
+			if err := inAnyConfiguredSubnet(subnet, endpoint.Addresses[0]); err != nil {
 				return err
 			}
 		}

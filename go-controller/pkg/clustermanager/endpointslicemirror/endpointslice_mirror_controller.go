@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package endpointslicemirror
 
 import (
@@ -21,11 +24,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const maxRetries = 10
@@ -94,7 +98,7 @@ func (c *Controller) enqueueEndpointSlice(obj interface{}) {
 		}
 	}
 	if key := c.getDefaultEndpointSliceKey(eps); key != "" {
-		c.queue.AddRateLimited(key)
+		c.queue.Add(key)
 	}
 }
 
@@ -125,7 +129,7 @@ func NewController(
 	}
 
 	c.queue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controllerutil.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: c.name},
 	)
 
@@ -252,12 +256,12 @@ func (c *Controller) syncDefaultEndpointSlice(ctx context.Context, key string) e
 		return err
 	}
 
-	if namespacePrimaryNetwork.IsDefault() || !namespacePrimaryNetwork.IsPrimaryNetwork() {
+	if namespacePrimaryNetwork == nil || namespacePrimaryNetwork.IsDefault() || !namespacePrimaryNetwork.IsPrimaryNetwork() {
 		return nil
 	}
 
-	klog.Infof("Processing %s/%s EndpointSlice in %q primary network", namespace, name, namespacePrimaryNetwork.GetNetworkName())
-
+	// Fetch the default and mirrored EndpointSlices first so we can do a cheap
+	// resource-version check before the more expensive NAD lookups.
 	defaultEndpointSlice, err := c.endpointSliceLister.EndpointSlices(namespace).Get(name)
 	if err != nil && !apierrors.IsNotFound(err) {
 		return err
@@ -316,13 +320,31 @@ func (c *Controller) syncDefaultEndpointSlice(ctx context.Context, key string) e
 		}
 	}
 
-	currentMirror, err := c.mirrorEndpointSlice(mirroredEndpointSlice, defaultEndpointSlice, namespacePrimaryNetwork)
+	// We have actual work to do — resolve the NAD for the primary network.
+	klog.Infof("Processing %s/%s EndpointSlice in %q primary network", namespace, name, namespacePrimaryNetwork.GetNetworkName())
+
+	nadKey, err := c.networkManager.GetPrimaryNADForNamespace(namespace)
+	if err != nil {
+		return err
+	}
+	if nadKey == types.DefaultNetworkName {
+		return fmt.Errorf("no primary NAD found for namespace %s", namespace)
+	}
+	if networkName := c.networkManager.GetNetworkNameForNADKey(nadKey); networkName == "" || networkName != namespacePrimaryNetwork.GetNetworkName() {
+		return fmt.Errorf("primary NAD %s does not match network %s", nadKey, namespacePrimaryNetwork.GetNetworkName())
+	}
+
+	currentMirror, err := c.mirrorEndpointSlice(mirroredEndpointSlice, defaultEndpointSlice, namespacePrimaryNetwork, nadKey)
 	if err != nil {
 		return err
 	}
 
 	if !reflect.DeepEqual(currentMirror, mirroredEndpointSlice) {
 		if currentMirror.Name == "" {
+			if len(currentMirror.Endpoints) == 0 {
+				klog.V(5).Infof("Skipping creation of empty mirrored EndpointSlice for: %s", cache.MetaObjectToName(defaultEndpointSlice))
+				return nil
+			}
 			klog.Infof("Creating the mirrored EndpointSlice for: %s", cache.MetaObjectToName(defaultEndpointSlice))
 			_, err := c.kubeClient.DiscoveryV1().EndpointSlices(namespace).Create(ctx, currentMirror, metav1.CreateOptions{})
 			return err
@@ -388,7 +410,7 @@ func (c *Controller) getPodIP(name, namespace, nadKey string, isIPv6 bool) (stri
 
 // mirrorEndpointSlice creates or updates a mirrored EndpointSlice based on the provided defaultEndpointSlice.
 // The mirrored EndpointSlice will have custom labels set and will be managed by the current controller.
-func (c *Controller) mirrorEndpointSlice(mirroredEndpointSlice, defaultEndpointSlice *v1.EndpointSlice, network util.NetInfo) (*v1.EndpointSlice, error) {
+func (c *Controller) mirrorEndpointSlice(mirroredEndpointSlice, defaultEndpointSlice *v1.EndpointSlice, network util.NetInfo, nadKey string) (*v1.EndpointSlice, error) {
 	var currentMirror *v1.EndpointSlice
 	if mirroredEndpointSlice != nil {
 		currentMirror = mirroredEndpointSlice.DeepCopy()
@@ -428,13 +450,9 @@ func (c *Controller) mirrorEndpointSlice(mirroredEndpointSlice, defaultEndpointS
 
 	currentMirror.Endpoints = make([]v1.Endpoint, len(defaultEndpointSlice.Endpoints))
 	isIPv6 := defaultEndpointSlice.AddressType == v1.AddressTypeIPv6
-	nadList := network.GetNADs()
-	if len(nadList) != 1 {
-		return nil, fmt.Errorf("expected one NAD in %s network, got: %d", network.GetNetworkName(), len(nadList))
-	}
 	for i, endpoint := range defaultEndpointSlice.Endpoints {
 		if endpoint.TargetRef != nil && endpoint.TargetRef.Kind == "Pod" {
-			podIP, err := c.getPodIP(endpoint.TargetRef.Name, endpoint.TargetRef.Namespace, nadList[0], isIPv6)
+			podIP, err := c.getPodIP(endpoint.TargetRef.Name, endpoint.TargetRef.Namespace, nadKey, isIPv6)
 			if err != nil {
 				return nil, fmt.Errorf("failed to determine the Pod IP of: %s/%s: %v", endpoint.TargetRef.Namespace, endpoint.TargetRef.Name, err)
 			}

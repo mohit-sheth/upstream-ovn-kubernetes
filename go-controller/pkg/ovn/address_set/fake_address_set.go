@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package addressset
 
 import (
@@ -14,8 +17,8 @@ import (
 	"github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
 )
 
 func NewFakeAddressSetFactory(controllerName string) *FakeAddressSetFactory {
@@ -224,47 +227,29 @@ func (f *FakeAddressSetFactory) expectAddressSetWithAddresses(g gomega.Gomega, d
 	g.Expect(lenAddressSet).To(gomega.Equal(len(addresses)))
 }
 
-func (f *FakeAddressSetFactory) getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName any) *libovsdbops.DbObjectIDs {
-	var dbIDs *libovsdbops.DbObjectIDs
-	if nsName, ok := dbIDsOrNsName.(string); ok {
-		dbIDs = libovsdbops.NewDbObjectIDs(libovsdbops.AddressSetNamespace, f.ControllerName, map[libovsdbops.ExternalIDKey]string{
-			libovsdbops.ObjectNameKey: nsName,
-		})
-	} else if dbIDs, ok = dbIDsOrNsName.(*libovsdbops.DbObjectIDs); !ok {
-		panic("unexpected type of argument passed to ExpectAddressSetWithAddresses")
-	}
-	return dbIDs
-}
-
 // ExpectAddressSetWithAddresses ensure address set exists with the given set of ips.
-// Address set is identified by dbIDsOrNsName, which may be a namespace name (string) or a *libovsdbops.DbObjectIDs.
-func (f *FakeAddressSetFactory) ExpectAddressSetWithAddresses(dbIDsOrNsName any, addresses []string) {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+func (f *FakeAddressSetFactory) ExpectAddressSetWithAddresses(dbIDs *libovsdbops.DbObjectIDs, addresses []string) {
 	g := gomega.Default
 	f.expectAddressSetWithAddresses(g, dbIDs, addresses)
 }
 
-func (f *FakeAddressSetFactory) EventuallyExpectAddressSetWithAddresses(dbIDsOrNsName any, addresses []string) {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+func (f *FakeAddressSetFactory) EventuallyExpectAddressSetWithAddresses(dbIDs *libovsdbops.DbObjectIDs, addresses []string) {
 	gomega.Eventually(func(g gomega.Gomega) {
 		f.expectAddressSetWithAddresses(g, dbIDs, addresses)
 	}).Should(gomega.Succeed())
 }
 
-// ExpectEmptyAddressSet ensures the address set owned by dbIDsOrNsName exists with no Addresses
-func (f *FakeAddressSetFactory) ExpectEmptyAddressSet(dbIDsOrNsName any) {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+// ExpectEmptyAddressSet ensures the address set owned by dbIDs exists with no Addresses
+func (f *FakeAddressSetFactory) ExpectEmptyAddressSet(dbIDs *libovsdbops.DbObjectIDs) {
 	f.ExpectAddressSetWithAddresses(dbIDs, nil)
 }
 
 // EventuallyExpectEmptyAddressSetExist ensures the named address set eventually exists with no Addresses
-func (f *FakeAddressSetFactory) EventuallyExpectEmptyAddressSetExist(dbIDsOrNsName any) {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+func (f *FakeAddressSetFactory) EventuallyExpectEmptyAddressSetExist(dbIDs *libovsdbops.DbObjectIDs) {
 	f.EventuallyExpectAddressSetWithAddresses(dbIDs, nil)
 }
 
-func (f *FakeAddressSetFactory) AddressSetExists(dbIDsOrNsName any) bool {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+func (f *FakeAddressSetFactory) AddressSetExists(dbIDs *libovsdbops.DbObjectIDs) bool {
 	name := getOvnAddressSetsName(dbIDs)
 	f.Lock()
 	defer f.Unlock()
@@ -273,21 +258,17 @@ func (f *FakeAddressSetFactory) AddressSetExists(dbIDsOrNsName any) bool {
 }
 
 // EventuallyExpectAddressSet ensures the named address set eventually exists
-func (f *FakeAddressSetFactory) EventuallyExpectAddressSet(dbIDsOrNsName any) {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+func (f *FakeAddressSetFactory) EventuallyExpectAddressSet(dbIDs *libovsdbops.DbObjectIDs) {
 	gomega.Eventually(func() bool {
 		return f.AddressSetExists(dbIDs)
 	}).Should(gomega.BeTrue())
 }
 
-// EventuallyExpectNoAddressSet ensures the named address set eventually does not exist
-// For namespaces address set deletion is delayed by 20 seconds, it is only tested once in namespace_test
-// to not slow down tests. Don't use for namespace-owned address sets
-func (f *FakeAddressSetFactory) EventuallyExpectNoAddressSet(dbIDsOrNsName any) {
-	dbIDs := f.getDbIDsFromNsNameOrDbIDs(dbIDsOrNsName)
+// EventuallyExpectNoAddressSet ensures the address set eventually does not exist
+func (f *FakeAddressSetFactory) EventuallyExpectNoAddressSet(dbIDs *libovsdbops.DbObjectIDs) {
 	gomega.Eventually(func() bool {
 		return f.AddressSetExists(dbIDs)
-	}).Should(gomega.BeFalse())
+	}).Should(gomega.BeFalse(), "expected address set %s to eventually not exist", dbIDs.String())
 }
 
 // ExpectNumberOfAddressSets ensures the number of created address sets equals given number
@@ -300,6 +281,7 @@ type removeFunc func(string)
 type fakeAddressSet struct {
 	name      string
 	hashName  string
+	uuid      string
 	addresses map[string]string
 	destroyed uint32
 }
@@ -340,10 +322,12 @@ func (f *FakeAddressSetFactory) newFakeAddressSets(addresses []string, dbIDs *li
 
 func (f *FakeAddressSetFactory) newFakeAddressSet(addresses []string, dbIDs *libovsdbops.DbObjectIDs, ipFamily string) *fakeAddressSet {
 	name := getDbIDsWithIPFamily(dbIDs, ipFamily).String()
+	hashName := hashedAddressSet(name)
 
 	as := &fakeAddressSet{
 		name:      name,
-		hashName:  hashedAddressSet(name),
+		hashName:  hashName,
+		uuid:      "uuid-" + hashName,
 		addresses: make(map[string]string),
 	}
 	for _, address := range addresses {
@@ -360,6 +344,18 @@ func (as *fakeAddressSets) GetASHashNames() (string, string) {
 	}
 	if as.ipv6 != nil {
 		ipv6AS = as.ipv6.getHashName()
+	}
+	return ipv4AS, ipv6AS
+}
+
+func (as *fakeAddressSets) GetASUUID() (string, string) {
+	var ipv4AS string
+	var ipv6AS string
+	if as.ipv4 != nil {
+		ipv4AS = as.ipv4.uuid
+	}
+	if as.ipv6 != nil {
+		ipv6AS = as.ipv6.uuid
 	}
 	return ipv4AS, ipv6AS
 }

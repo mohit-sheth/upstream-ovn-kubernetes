@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package networkqos
 
 import (
@@ -5,9 +8,10 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	ovnkutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	ovnkutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func joinMetaNamespaceAndName(namespace, name string, separator ...string) string {
@@ -31,16 +35,16 @@ func GetNetworkQoSAddrSetDbIDs(nqosNamespace, nqosName, ruleIndex, ipBlockIndex,
 		})
 }
 
-func getPodAddresses(pod *corev1.Pod, networkInfo ovnkutil.NetInfo) ([]string, error) {
+func getPodAddresses(pod *corev1.Pod, networkInfo ovnkutil.NetInfo, resolver func(nadKey string) string) ([]string, error) {
 	// check annotation "k8s.ovn.org/pod-networks" before calling GetPodIPsOfNetwork,
 	// as it's no easy to check if the error is caused by missing annotation, while
 	// we don't want to return error for such case as it will trigger retry
-	_, ok := pod.Annotations[ovnkutil.OvnPodAnnotationName]
+	_, ok := pod.Annotations[types.OvnPodAnnotationName]
 	if !ok {
 		// pod hasn't been annotated yet, return nil to avoid retry
 		return nil, nil
 	}
-	ips, err := ovnkutil.GetPodIPsOfNetwork(pod, networkInfo)
+	ips, err := ovnkutil.GetPodIPsOfNetwork(pod, networkInfo, resolver)
 	if err != nil {
 		return nil, err
 	}
@@ -74,11 +78,4 @@ func addressSetToMatchString(addrset addressset.AddressSet, dir trafficDirection
 		output = fmt.Sprintf("ip6.%s == {$%s}", dir, ipv6AddrSetHashName)
 	}
 	return output
-}
-
-func getNamespaceAddressSet(addressSetFactory addressset.AddressSetFactory, controllerName, namespace string) (addressset.AddressSet, error) {
-	dbIDs := libovsdbops.NewDbObjectIDs(libovsdbops.AddressSetNamespace, controllerName, map[libovsdbops.ExternalIDKey]string{
-		libovsdbops.ObjectNameKey: namespace,
-	})
-	return addressSetFactory.EnsureAddressSet(dbIDs)
 }

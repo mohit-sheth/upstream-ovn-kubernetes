@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package topology
 
 import (
@@ -6,10 +9,11 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type GatewayTopologyFactory struct {
@@ -36,17 +40,18 @@ func (gtf *GatewayTopologyFactory) NewClusterRouterWithMulticastSupport(
 	netInfo util.NetInfo,
 	coopUUID string,
 ) (*nbdb.LogicalRouter, error) {
-	routerOptions := map[string]string{"mcast_relay": "true"}
+	routerOptions := map[string]string{"mcast_relay": "true", "always_learn_from_arp_request": "false"}
 	return gtf.newClusterRouter(clusterRouterName, netInfo, coopUUID, routerOptions)
 }
 
 func (gtf *GatewayTopologyFactory) NewTransitRouter(
+	transitRouterName string,
 	netInfo util.NetInfo,
 	coopUUID string,
 	tunnelKey string,
 ) (*nbdb.LogicalRouter, error) {
 	routerOptions := map[string]string{libovsdbops.RequestedTnlKey: tunnelKey}
-	return gtf.newClusterRouter(netInfo.GetNetworkScopedClusterRouterName(), netInfo, coopUUID, routerOptions)
+	return gtf.newClusterRouter(transitRouterName, netInfo, coopUUID, routerOptions)
 }
 
 func (gtf *GatewayTopologyFactory) newClusterRouter(
@@ -63,6 +68,14 @@ func (gtf *GatewayTopologyFactory) newClusterRouter(
 		},
 		Options: routerOptions,
 		Copp:    &coopUUID,
+	}
+	if netInfo.IsUserDefinedNetwork() &&
+		config.Gateway.Mode == config.GatewayModeLocal &&
+		clusterRouterName == netInfo.GetNetworkScopedClusterRouterName() {
+		// The LGW UDN cluster router owns the conditional UDN subnet SNAT. Commit
+		// all traffic in that router's CT zone so replies do not enter the SNAT
+		// zone as new flows and hit that SNAT before service reverse NAT.
+		logicalRouter.Options["ct-commit-all"] = "true"
 	}
 	if netInfo.IsUserDefinedNetwork() {
 		logicalRouter.ExternalIDs[types.NetworkExternalID] = netInfo.GetNetworkName()

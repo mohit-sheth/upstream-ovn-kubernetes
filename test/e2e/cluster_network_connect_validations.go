@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -6,9 +9,9 @@ import (
 
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/feature"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/testscenario"
-	testscenariocnc "github.com/ovn-org/ovn-kubernetes/test/e2e/testscenario/clusternetworkconnect"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/testscenario"
+	testscenariocnc "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/testscenario/clusternetworkconnect"
 )
 
 var _ = Describe("ClusterNetworkConnect: API validations", feature.NetworkConnect, func() {

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
@@ -13,10 +16,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/listers/core/v1"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	mocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/client-go/listers/core/v1"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -73,7 +76,7 @@ var _ = Describe("CNI Utils tests", func() {
 
 	Context("isOvnReady", func() {
 		It("Returns true if OVN pod network annotation exists", func() {
-			podAnnot := map[string]string{util.OvnPodAnnotationName: defaultPodAnnotation}
+			podAnnot := map[string]string{ovntypes.OvnPodAnnotationName: defaultPodAnnotation}
 			pod.Annotations = podAnnot
 			_, ready, _ := isOvnReady(pod, ovntypes.DefaultNetworkName)
 			Expect(ready).To(BeTrue())
@@ -90,7 +93,7 @@ var _ = Describe("CNI Utils tests", func() {
 	Context("isDPUReady", func() {
 		It("Returns true if dpu.connection-status is present and Status is Ready", func() {
 			podAnnot := map[string]string{
-				util.OvnPodAnnotationName:     defaultPodAnnotation,
+				ovntypes.OvnPodAnnotationName: defaultPodAnnotation,
 				util.DPUConnectionStatusAnnot: `{"Status":"Ready"}`}
 			pod.Annotations = podAnnot
 			_, ready, err := isDPUReady(nil, ovntypes.DefaultNetworkName)(pod, ovntypes.DefaultNetworkName)
@@ -100,7 +103,7 @@ var _ = Describe("CNI Utils tests", func() {
 
 		It("Returns false if dpu.connection-status is present and Status is not Ready", func() {
 			podAnnot := map[string]string{
-				util.OvnPodAnnotationName:     defaultPodAnnotation,
+				ovntypes.OvnPodAnnotationName: defaultPodAnnotation,
 				util.DPUConnectionStatusAnnot: `{"Status":"NotReady"}`}
 			pod.Annotations = podAnnot
 			_, ready, err := isDPUReady(nil, ovntypes.DefaultNetworkName)(pod, ovntypes.DefaultNetworkName)
@@ -110,7 +113,7 @@ var _ = Describe("CNI Utils tests", func() {
 
 		It("Returns false if dpu.connection-status Status is not present", func() {
 			podAnnot := map[string]string{
-				util.OvnPodAnnotationName:     defaultPodAnnotation,
+				ovntypes.OvnPodAnnotationName: defaultPodAnnotation,
 				util.DPUConnectionStatusAnnot: `{"Foo":"Bar"}`}
 			pod.Annotations = podAnnot
 			_, ready, err := isDPUReady(nil, ovntypes.DefaultNetworkName)(pod, ovntypes.DefaultNetworkName)
@@ -119,7 +122,7 @@ var _ = Describe("CNI Utils tests", func() {
 		})
 
 		It("Returns false if dpu.connection-status is not present", func() {
-			podAnnot := map[string]string{util.OvnPodAnnotationName: defaultPodAnnotation}
+			podAnnot := map[string]string{ovntypes.OvnPodAnnotationName: defaultPodAnnotation}
 			pod.Annotations = podAnnot
 			_, ready, err := isDPUReady(nil, ovntypes.DefaultNetworkName)(pod, ovntypes.DefaultNetworkName)
 			Expect(err).ToNot(HaveOccurred())
@@ -145,8 +148,6 @@ var _ = Describe("CNI Utils tests", func() {
 		It("Returns Pod annotation if annotation condition is met", func() {
 			podAnnot := map[string]string{"foo": "bar"}
 			pod.Annotations = podAnnot
-			ctx, cancelFunc := context.WithTimeout(context.Background(), 20*time.Millisecond)
-			defer cancelFunc()
 
 			cond := func(pod *corev1.Pod, _ string) (*util.PodAnnotation, bool, error) {
 				if _, ok := pod.Annotations["foo"]; ok {
@@ -156,7 +157,8 @@ var _ = Describe("CNI Utils tests", func() {
 			}
 
 			clientset := newFakeClientSet(pod, &podNamespaceLister)
-
+			ctx, cancelFunc := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancelFunc()
 			podNamespaceLister.On("Get", mock.AnythingOfType("string")).Return(pod, nil)
 			returnedPod, annot, _, err := GetPodWithAnnotations(ctx, clientset, namespace, podName, ovntypes.DefaultNetworkName, cond)
 			Expect(err).ToNot(HaveOccurred())
@@ -258,7 +260,7 @@ var _ = Describe("CNI Utils tests", func() {
 
 	Context("PodAnnotation2PodInfo", func() {
 		podAnnot := map[string]string{
-			util.OvnPodAnnotationName: `{
+			ovntypes.OvnPodAnnotationName: `{
 "default":{"ip_addresses":["192.168.2.3/24"],
 "mac_address":"0a:58:c0:a8:02:03",
 "gateway_ips":["192.168.2.1"],

@@ -61,6 +61,9 @@ Did you write new configs or knobs that need to be turned on
 for this feature? If so educate end users on those details.
 How can users disable this feature if they don't want it?
 
+(Copy the next line as is for every feature pointing to the common requirement page. Don't forget to edit the path if your feature file is in a folder.)
+Always check the dependencies on the [Requirements page](requirements.md)
+
 ## Workflow Description
 
 Explain how the user will use the feature. Be detailed and explicit.
@@ -94,8 +97,7 @@ was implemented in OVN-Kubernetes in this section.
 
 What were the changes made to ovn-kubernetes control plane and
 data plane to make this happen? Note differences if any for local
-gateway versus shared gateway and default mode versus interconnect
-mode. **A detailed OVN-Kubernetes networking topology diagram is a must
+gateway versus shared gateway. **A detailed OVN-Kubernetes networking topology diagram is a must
 to showcase how this feature works in our CNI**. Remember that a picture
 can speak a thousand words. Give details on how the above API is watched
 and converted into OVN objects by OVN-Kubernetes. If there are changes

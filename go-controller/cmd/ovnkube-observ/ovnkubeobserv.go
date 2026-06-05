@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -8,7 +11,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	observ "github.com/ovn-org/ovn-kubernetes/go-controller/observability-lib"
+	observ "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/observability-lib"
 )
 
 func main() {

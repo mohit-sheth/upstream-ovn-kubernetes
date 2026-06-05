@@ -50,6 +50,37 @@ data:
   mtu:           {{ .Values.mtu | default 1500 | quote }}
   host_network_namespace: {{ $hostNetworkNamespace }}
 
+---
+# ovnkube-config ConfigMap
+#
+# Configuration for ovnkube binaries
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: ovnkube-config
+  namespace: ovn-kubernetes
+data:
+  ovnkube.conf: |
+{{- if .Values.global.enableNoOverlay }}
+    [default]
+    transport = no-overlay
+
+    [no-overlay]
+{{- if .Values.global.enableNoOverlaySnat }}
+    outbound-snat = enabled
+{{- else }}
+    outbound-snat = disabled
+{{- end }}
+    routing = {{ if .Values.global.enableNoOverlayManagedRouting }}managed{{ else }}unmanaged{{ end }}
+{{- if .Values.global.enableNoOverlayManagedRouting }}
+
+    [bgp-managed]
+    as-number = {{ .Values.global.managedBGPASNumber | default 64512 }}
+    topology = {{ .Values.global.managedBGPTopology | default "full-mesh" }}
+    frr-namespace = {{ .Values.global.managedBGPFRRNamespace | default "frr-k8s-system" }}
+{{- end }}
+{{- end }}
+
 {{- if or .Values.global.skipCallToK8s (eq (include "needNamespace" $hostNetworkNamespace) "true") }}
 ---
 # ovn-host-network-namespace.yaml
@@ -62,6 +93,23 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: {{ $hostNetworkNamespace }}
+{{- end }}
+
+{{- if and (eq (hasKey .Values.global "enableRouteAdvertisements" | ternary .Values.global.enableRouteAdvertisements false) true) (eq (hasKey .Values.global "advertiseDefaultNetwork" | ternary .Values.global.advertiseDefaultNetwork false) true) }}
+---
+apiVersion: k8s.ovn.org/v1
+kind: RouteAdvertisements
+metadata:
+  name: default
+spec:
+  networkSelectors:
+    - networkSelectionType: DefaultNetwork
+  nodeSelector: {}
+  frrConfigurationSelector:
+    matchLabels:
+      name: receive-all
+  advertisements:
+    - "PodNetwork"
 {{- end }}
 
 {{- if (and .Values.global.dockerConfigSecret .Values.global.dockerConfigSecret.create) }}

@@ -1,9 +1,13 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"regexp"
@@ -17,8 +21,8 @@ import (
 	"k8s.io/klog/v2"
 	kexec "k8s.io/utils/exec"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 const (
@@ -174,7 +178,7 @@ func (runsvc *defaultExecRunner) RunCmd(cmd kexec.Cmd, cmdPath string, envVars [
 	return stdout, stderr, err
 }
 
-var runCmdExecRunner ExecRunner = &defaultExecRunner{}
+var RunCmdExecRunner ExecRunner = &defaultExecRunner{}
 
 // SetExec validates executable paths and saves the given exec interface
 // to be used for running various OVS and OVN utilites
@@ -301,17 +305,17 @@ func ResetRunner() {
 var runCounter uint64
 
 func runCmd(cmd kexec.Cmd, cmdPath string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
-	return runCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
+	return RunCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
 }
 
 func run(cmdPath string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	cmd := runner.exec.Command(cmdPath, args...)
-	return runCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
+	return RunCmdExecRunner.RunCmd(cmd, cmdPath, []string{}, args...)
 }
 
 func runWithEnvVars(cmdPath string, envVars []string, args ...string) (*bytes.Buffer, *bytes.Buffer, error) {
 	cmd := runner.exec.Command(cmdPath, args...)
-	return runCmdExecRunner.RunCmd(cmd, cmdPath, envVars, args...)
+	return RunCmdExecRunner.RunCmd(cmd, cmdPath, envVars, args...)
 }
 
 // RunOVSOfctl runs a command via ovs-ofctl.
@@ -401,7 +405,7 @@ func runOVNretry(cmdPath string, envVars []string, extraArgsFunc func() ([]strin
 		}
 
 		// Connection refused
-		// Master may not be up so keep trying
+		// OVN DB may not be up so keep trying
 		if strings.Contains(stderr.String(), "Connection refused") {
 			if retriesLeft == 0 {
 				return stdout, stderr, err
@@ -417,34 +421,9 @@ func runOVNretry(cmdPath string, envVars []string, extraArgsFunc func() ([]strin
 }
 
 func getNbctlArgsAndEnv(timeout int, args ...string) ([]string, []string) {
-	var cmdArgs []string
-
-	if config.OvnNorth.Scheme == config.OvnDBSchemeSSL {
-		cmdArgs = append(cmdArgs,
-			fmt.Sprintf("--private-key=%s", config.OvnNorth.PrivKey),
-			fmt.Sprintf("--certificate=%s", config.OvnNorth.Cert),
-			fmt.Sprintf("--bootstrap-ca-cert=%s", config.OvnNorth.CACert),
-			fmt.Sprintf("--db=%s", config.OvnNorth.GetURL()))
-	} else if config.OvnNorth.Scheme == config.OvnDBSchemeTCP {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--db=%s", config.OvnNorth.GetURL()))
-	}
-	cmdArgs = append(cmdArgs, fmt.Sprintf("--timeout=%d", timeout))
+	cmdArgs := []string{fmt.Sprintf("--timeout=%d", timeout)}
 	cmdArgs = append(cmdArgs, args...)
 	return cmdArgs, []string{}
-}
-
-func getNbOVSDBArgs(command string, args ...string) []string {
-	var cmdArgs []string
-	if config.OvnNorth.Scheme == config.OvnDBSchemeSSL {
-		cmdArgs = append(cmdArgs,
-			fmt.Sprintf("--private-key=%s", config.OvnNorth.PrivKey),
-			fmt.Sprintf("--certificate=%s", config.OvnNorth.Cert),
-			fmt.Sprintf("--bootstrap-ca-cert=%s", config.OvnNorth.CACert))
-	}
-	cmdArgs = append(cmdArgs, command)
-	cmdArgs = append(cmdArgs, config.OvnNorth.GetURL())
-	cmdArgs = append(cmdArgs, args...)
-	return cmdArgs
 }
 
 // RunOVNNbctlWithTimeout runs command via ovn-nbctl with a specific timeout
@@ -472,22 +451,7 @@ func RunOVNNbctl(args ...string) (string, string, error) {
 // FIXME: Remove when https://github.com/ovn-kubernetes/libovsdb/issues/235 is fixed
 func RunOVNSbctlWithTimeout(timeout int, args ...string) (string, string,
 	error) {
-	var cmdArgs []string
-	if config.OvnSouth.Scheme == config.OvnDBSchemeSSL {
-		cmdArgs = []string{
-			fmt.Sprintf("--private-key=%s", config.OvnSouth.PrivKey),
-			fmt.Sprintf("--certificate=%s", config.OvnSouth.Cert),
-			fmt.Sprintf("--bootstrap-ca-cert=%s", config.OvnSouth.CACert),
-			fmt.Sprintf("--db=%s", config.OvnSouth.GetURL()),
-		}
-	} else if config.OvnSouth.Scheme == config.OvnDBSchemeTCP {
-		cmdArgs = []string{
-			fmt.Sprintf("--db=%s", config.OvnSouth.GetURL()),
-		}
-	}
-
-	cmdArgs = append(cmdArgs, fmt.Sprintf("--timeout=%d", timeout))
-	cmdArgs = append(cmdArgs, "--no-leader-only")
+	cmdArgs := []string{fmt.Sprintf("--timeout=%d", timeout)}
 	cmdArgs = append(cmdArgs, args...)
 	stdout, stderr, err := runOVNretry(runner.sbctlPath, nil, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
@@ -502,13 +466,6 @@ func RunOVSDBClient(args ...string) (string, string, error) {
 // RunOVSDBTool runs an 'ovsdb-tool [OPTIONS] COMMAND [ARG...] command'.
 func RunOVSDBTool(args ...string) (string, string, error) {
 	stdout, stderr, err := run(runner.ovsdbToolPath, args...)
-	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
-}
-
-// RunOVSDBClientOVN runs an 'ovsdb-client [OPTIONS] COMMAND [SERVER] [ARG...] command' against OVN NB database.
-func RunOVSDBClientOVNNB(command string, args ...string) (string, string, error) {
-	cmdArgs := getNbOVSDBArgs(command, args...)
-	stdout, stderr, err := runOVNretry(runner.ovsdbClientPath, nil, nil, cmdArgs...)
 	return strings.Trim(strings.TrimSpace(stdout.String()), "\""), stderr.String(), err
 }
 
@@ -669,16 +626,84 @@ func AddOFFlowWithSpecificAction(bridgeName, action string) (string, string, err
 	return strings.Trim(stdout.String(), "\" \n"), stderr.String(), err
 }
 
+// openFlowStdinReader incrementally renders a flow slice as a newline-delimited
+// stream for ovs-ofctl stdin without constructing one large joined string.
+type openFlowStdinReader struct {
+	flows      []string
+	flowIndex  int
+	flowOffset int
+	needEOL    bool
+}
+
+// Read implements io.Reader over r.flows, producing output equivalent to
+// strings.Join(flows, "\n"), but in small chunks to reduce peak allocations.
+func (r *openFlowStdinReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// Fast path: no flows left and no pending delimiter.
+	if r.flowIndex >= len(r.flows) && !r.needEOL {
+		return 0, io.EOF
+	}
+
+	total := 0
+	for total < len(p) {
+		if r.needEOL {
+			// Emit exactly one '\n' between flows.
+			p[total] = '\n'
+			total++
+			r.needEOL = false
+			if total == len(p) {
+				return total, nil
+			}
+			continue
+		}
+
+		if r.flowIndex >= len(r.flows) {
+			break
+		}
+
+		flow := r.flows[r.flowIndex]
+		if r.flowOffset >= len(flow) {
+			// Current flow was fully consumed; advance and schedule delimiter if
+			// there is another flow.
+			r.flowIndex++
+			r.flowOffset = 0
+			r.needEOL = r.flowIndex < len(r.flows)
+			continue
+		}
+
+		// Copy as much of the current flow as fits in caller's buffer.
+		copied := copy(p[total:], flow[r.flowOffset:])
+		total += copied
+		r.flowOffset += copied
+	}
+
+	if total == 0 {
+		return 0, io.EOF
+	}
+	return total, nil
+}
+
 // ReplaceOFFlows replaces flows in the bridge with a slice of flows
 func ReplaceOFFlows(bridgeName string, flows []string) (string, string, error) {
 	args := []string{"-O", "OpenFlow13", "--bundle", "replace-flows", bridgeName, "-"}
-	stdin := &bytes.Buffer{}
-	stdin.Write([]byte(strings.Join(flows, "\n")))
+	stdin := &openFlowStdinReader{flows: flows}
 
 	cmd := runner.exec.Command(runner.ofctlPath, args...)
 	cmd.SetStdin(stdin)
 	stdout, stderr, err := runCmd(cmd, runner.ofctlPath, args...)
 	return strings.Trim(stdout.String(), "\" \n"), stderr.String(), err
+}
+
+// AddOrModOFGroup creates or modifies an OpenFlow group on the bridge.
+func AddOrModOFGroup(bridgeName, group string) (string, string, error) {
+	return RunOVSOfctl("-O", "OpenFlow13", "--may-create", "mod-group", bridgeName, group)
+}
+
+// DeleteOFGroup deletes an OpenFlow group from the bridge by group ID.
+func DeleteOFGroup(bridgeName, groupID string) (string, string, error) {
+	return RunOVSOfctl("-O", "OpenFlow13", "del-groups", bridgeName, fmt.Sprintf("group_id=%s", groupID))
 }
 
 // GetOFFlows gets all the flows from a bridge
@@ -785,31 +810,6 @@ func GetOVNDBServerInfo(timeout int, direction, database string) (*OVNDBServerSt
 	return serverStatus, nil
 }
 
-// DetectSCTPSupport checks if OVN supports SCTP for load balancer
-func DetectSCTPSupport() (bool, error) {
-	stdout, stderr, err := RunOVSDBClientOVNNB("list-columns", "--data=bare", "--no-heading",
-		"--format=json", "OVN_Northbound", "Load_Balancer")
-	if err != nil {
-		klog.Errorf("Failed to query OVN NB DB for SCTP support, "+
-			"stdout: %q, stderr: %q, error: %v", stdout, stderr, err)
-		return false, err
-	}
-	type OvsdbData struct {
-		Data [][]interface{}
-	}
-	var lbData OvsdbData
-	err = json.Unmarshal([]byte(stdout), &lbData)
-	if err != nil {
-		return false, err
-	}
-	for _, entry := range lbData.Data {
-		if entry[0].(string) == "protocol" && strings.Contains(fmt.Sprintf("%v", entry[1]), "sctp") {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // DetectCheckPktLengthSupport checks if OVN supports check packet length action in OVS kernel datapath
 func DetectCheckPktLengthSupport(bridge string) (bool, error) {
 	stdout, stderr, err := RunOvsVswitchdAppCtl("dpif/show-dp-features", bridge)
@@ -860,10 +860,9 @@ func IsOvsHwOffloadEnabled() (bool, error) {
 }
 
 type OvsDbProperties struct {
-	AppCtl        func(timeout int, args ...string) (string, string, error)
-	DbAlias       string
-	DbName        string
-	ElectionTimer int
+	AppCtl  func(timeout int, args ...string) (string, string, error)
+	DbAlias string
+	DbName  string
 }
 
 // GetOvsDbProperties inits OvsDbProperties based on db file path given to it.
@@ -871,17 +870,15 @@ type OvsDbProperties struct {
 func GetOvsDbProperties(db string) (*OvsDbProperties, error) {
 	if strings.Contains(db, "ovnnb") {
 		return &OvsDbProperties{
-			ElectionTimer: int(config.OvnNorth.ElectionTimer) * 1000,
-			AppCtl:        RunOVNNBAppCtlWithTimeout,
-			DbName:        "OVN_Northbound",
-			DbAlias:       db,
+			AppCtl:  RunOVNNBAppCtlWithTimeout,
+			DbName:  "OVN_Northbound",
+			DbAlias: db,
 		}, nil
 	} else if strings.Contains(db, "ovnsb") {
 		return &OvsDbProperties{
-			ElectionTimer: int(config.OvnSouth.ElectionTimer) * 1000,
-			AppCtl:        RunOVNSBAppCtlWithTimeout,
-			DbName:        "OVN_Southbound",
-			DbAlias:       db,
+			AppCtl:  RunOVNSBAppCtlWithTimeout,
+			DbName:  "OVN_Southbound",
+			DbAlias: db,
 		}, nil
 	} else {
 		return nil, fmt.Errorf("failed to parse ovn db type Northbound/Southbound from the path %s", db)

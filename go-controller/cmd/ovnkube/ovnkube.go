@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -14,6 +17,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urfave/cli/v2"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -25,18 +29,17 @@ import (
 
 	"github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controllermanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	ovnnode "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllermanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	ovnnode "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const (
@@ -76,7 +79,6 @@ func getFlagsByCategory() map[string][]cli.Flag {
 	m["OVN Gateway Options"] = config.OVNGatewayFlags
 	m["Cluster Manager Options"] = config.ClusterManagerFlags
 	m["Cluster Manager HA Options"] = config.ClusterMgrHAFlags
-	m["Master HA Options"] = config.MasterHAFlags
 	m["OVN Kube Node Options"] = config.OvnKubeNodeFlags
 	m["Monitoring Options"] = config.MonitoringFlags
 	m["IPFIX Flow Tracing Options"] = config.IPFIXFlags
@@ -109,7 +111,7 @@ func main() {
 	cli.HelpPrinterCustom = printOvnKubeHelp
 	c := cli.NewApp()
 	c.Name = "ovnkube"
-	c.Usage = "run ovnkube to start master, node, and gateway services"
+	c.Usage = "run ovnkube to start control plane, node, and gateway services"
 	c.Version = config.Version
 	c.CustomAppHelpTemplate = CustomAppHelpTemplate
 	c.Flags = config.GetFlags(nil)
@@ -187,8 +189,8 @@ func setupPIDFile(pidfile string) error {
 
 // ovnkubeRunMode object stores the run mode of the ovnkube
 type ovnkubeRunMode struct {
-	ovnkubeController bool // ovnkube controller (--init-ovnkube-controller or --init-master) is enabled
-	clusterManager    bool // cluster manager (--init-cluster-manager or --init-master) is enabled
+	ovnkubeController bool // ovnkube controller (--init-ovnkube-controller) is enabled
+	clusterManager    bool // cluster manager (--init-cluster-manager) is enabled
 	node              bool // node (--init-node) is enabled
 	cleanupNode       bool // cleanup (--cleanup-node) is enabled
 
@@ -202,24 +204,17 @@ type ovnkubeRunMode struct {
 // determineOvnkubeRunMode determines the run modes of ovnkube
 // based on the init flags set.  It is possible to run ovnkube in
 // multiple modes.  Allowed multiple modes are:
-//   - master (ovnkube controller + cluster manager) + node
-//   - ovnkube controller + cluster manager
 //   - ovnkube controller + node
+//
+// Now ovnkube-controller always runs co-located with node, so combining
+// it with cluster manager is not supported.
 func determineOvnkubeRunMode(ctx *cli.Context) (*ovnkubeRunMode, error) {
 	mode := &ovnkubeRunMode{}
 
-	master := ctx.String("init-master")
 	cm := ctx.String("init-cluster-manager")
 	ovnkController := ctx.String("init-ovnkube-controller")
 	node := ctx.String("init-node")
 	cleanup := ctx.String("cleanup-node")
-
-	if master != "" {
-		// If init-master is set, then both ovnkube controller and cluster manager
-		// are enabled
-		mode.ovnkubeController = true
-		mode.clusterManager = true
-	}
 
 	if cm != "" {
 		mode.clusterManager = true
@@ -249,7 +244,12 @@ func determineOvnkubeRunMode(ctx *cli.Context) (*ovnkubeRunMode, error) {
 		return nil, fmt.Errorf("cannot run in both cluster manager and node mode")
 	}
 
-	identities := sets.NewString(master, cm, ovnkController, node, cleanup)
+	if mode.clusterManager && mode.ovnkubeController {
+		return nil, fmt.Errorf("cannot run cluster manager and ovnkube-controller in the same process; " +
+			"ovnkube-controller runs co-located with node")
+	}
+
+	identities := sets.NewString(cm, ovnkController, node, cleanup)
 	identities.Delete("")
 	if identities.Len() != 1 {
 		return nil, fmt.Errorf("provided no identity or different identities for different modes")
@@ -258,6 +258,15 @@ func determineOvnkubeRunMode(ctx *cli.Context) (*ovnkubeRunMode, error) {
 	mode.identity, _ = identities.PopAny()
 
 	return mode, nil
+}
+
+// Determine if we should serve both ovnkube-node and OVN/OVS metrics on a single endpoint.
+func combineMetricsEndpoints(runMode *ovnkubeRunMode) bool {
+	return runMode != nil &&
+		runMode.node &&
+		config.Metrics.BindAddress != "" &&
+		config.Metrics.BindAddress == config.Metrics.OVNMetricsBindAddress &&
+		(config.IsModeDPU() || config.IsModeFull())
 }
 
 func startOvnKube(ctx *cli.Context, cancel context.CancelFunc) error {
@@ -289,7 +298,7 @@ func startOvnKube(ctx *cli.Context, cancel context.CancelFunc) error {
 	if config.Kubernetes.BootstrapKubeconfig != "" {
 		// In the case of dpus K8S_NODE will be set to dpu host's name
 		var csrNodeName string
-		if config.OvnKubeNode.Mode == types.NodeModeDPU {
+		if config.IsModeDPU() {
 			csrNodeName = os.Getenv("K8S_NODE_DPU")
 		} else {
 			csrNodeName = os.Getenv("K8S_NODE")
@@ -310,45 +319,23 @@ func startOvnKube(ctx *cli.Context, cancel context.CancelFunc) error {
 
 	eventRecorder := util.EventRecorder(ovnClientset.KubeClient)
 
-	// Start metric server for master and node. Expose the metrics HTTP endpoint if configured.
-	// Non LE master instances also are required to expose the metrics server.
-	if config.Metrics.BindAddress != "" {
+	if config.Metrics.BindAddress != "" && !combineMetricsEndpoints(runMode) {
 		metrics.StartMetricsServer(config.Metrics.BindAddress, config.Metrics.EnablePprof,
 			config.Metrics.NodeServerCert, config.Metrics.NodeServerPrivKey, ctx.Done(), ovnKubeStartWg)
 	}
 
-	// no need for leader election in node mode
-	// only node mode
-	if !runMode.clusterManager && !runMode.ovnkubeController {
+	// In IC mode, only cluster manager runs leader election. Node and
+	// ovnkube-controller (which always runs co-located with node) start directly.
+	if !runMode.clusterManager {
+		if runMode.ovnkubeController {
+			metrics.RegisterOVNKubeControllerBase()
+		}
 		return runOvnKube(ctx.Context, runMode, ovnClientset, eventRecorder)
 	}
 
-	// ovnkube-controller with node
-	if runMode.node && runMode.ovnkubeController {
-		metrics.RegisterOVNKubeControllerBase()
-		return runOvnKube(ctx.Context, runMode, ovnClientset, eventRecorder)
-	}
-
-	// Register prometheus metrics that do not depend on becoming ovnkube-controller
-	// leader and get the proper HA config depending on the mode. For ovnkube
-	// controller mode or combined cluster manager and ovnkube-controller modes (the classic
-	// master mode), the master HA config applies. For cluster manager
-	// standalone mode, the cluster manager HA config applies.
-	var haConfig *config.HAConfig
-	var name string
-	switch {
-	case runMode.ovnkubeController && runMode.clusterManager:
-		metrics.RegisterClusterManagerBase()
-		fallthrough
-	case runMode.ovnkubeController:
-		metrics.RegisterOVNKubeControllerBase()
-		haConfig = &config.MasterHA
-		name = controllerManagerLockName()
-	case runMode.clusterManager:
-		metrics.RegisterClusterManagerBase()
-		haConfig = &config.ClusterMgrHA
-		name = "ovn-kubernetes-master"
-	}
+	metrics.RegisterClusterManagerBase()
+	haConfig := &config.ClusterMgrHA
+	name := "ovn-kubernetes-master"
 
 	// Set up leader election process. Use lease resource lock as configmap and
 	// endpoint lock support has been removed from leader election library.
@@ -490,7 +477,7 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 	// Remove when OVN supports native silencing of GARPs on startup: https://issues.redhat.com/browse/FDP-1537
 	// isOVNKubeControllerSyncd is true when ovnkube controller has sync and changes are in OVN Southbound database.
 	var isOVNKubeControllerSyncd *atomic.Bool
-	if runMode.ovnkubeController && runMode.node && config.OVNKubernetesFeature.EnableEgressIP && config.OVNKubernetesFeature.EnableInterconnect && config.OvnKubeNode.Mode == types.NodeModeFull {
+	if runMode.ovnkubeController && runMode.node && config.OVNKubernetesFeature.EnableEgressIP && config.IsModeFull() {
 		isOVNKubeControllerSyncd = &atomic.Bool{}
 	}
 
@@ -564,7 +551,7 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 			metrics.RegisterNodeMetrics(ctx.Done())
 
 			// OVS is not running on dpu-host nodes
-			if config.OvnKubeNode.Mode != types.NodeModeDPUHost {
+			if config.IsModeDPU() || config.IsModeFull() {
 				ovsClient, err = libovsdb.NewOVSClient(ctx.Done())
 				if err != nil {
 					nodeErr = fmt.Errorf("failed to initialize libovsdb vswitchd client: %w", err)
@@ -602,8 +589,7 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 
 	// start the prometheus server to serve OVS and OVN Metrics (default port: 9476)
 	// Note: for ovnkube node mode dpu-host no metrics is required as ovs/ovn is not running on the node.
-	if config.OvnKubeNode.Mode != types.NodeModeDPUHost && config.Metrics.OVNMetricsBindAddress != "" {
-		metricsScrapeInterval := 30
+	if runMode.node && (config.IsModeDPU() || config.IsModeFull()) && config.Metrics.OVNMetricsBindAddress != "" {
 
 		if ovsClient == nil {
 			ovsClient, err = libovsdb.NewOVSClient(ctx.Done())
@@ -613,13 +599,23 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 			}
 		}
 		if ovsClient != nil {
-			if config.Metrics.ExportOVSMetrics {
-				metrics.RegisterOvsMetricsWithOvnMetrics(ovsClient, metricsScrapeInterval, ctx.Done())
+			opts := metrics.MetricServerOptions{
+				BindAddress:                config.Metrics.OVNMetricsBindAddress,
+				CertFile:                   config.Metrics.NodeServerCert,
+				KeyFile:                    config.Metrics.NodeServerPrivKey,
+				EnableOVSMetrics:           config.Metrics.ExportOVSMetrics,
+				EnableOVNControllerMetrics: true,
+				EnableOVNNorthdMetrics:     true,
+				EnableOVNDBMetrics:         true,
 			}
-			metrics.RegisterOvnMetrics(ovnClientset.KubeClient, runMode.identity,
-				ovsClient, metricsScrapeInterval, ctx.Done())
-			metrics.StartOVNMetricsServer(config.Metrics.OVNMetricsBindAddress,
-				config.Metrics.NodeServerCert, config.Metrics.NodeServerPrivKey, ctx.Done(), wg)
+
+			if combineMetricsEndpoints(runMode) {
+				// Reuse the default registry (and its gatherer) so ovnkube-node metrics and OVN metrics share one endpoint.
+				opts.Registerer = prometheus.DefaultRegisterer
+				opts.EnablePprof = config.Metrics.EnablePprof
+			}
+
+			metrics.StartOVNMetricsServer(opts, ovsClient, ovnClientset.KubeClient, ctx.Done(), wg)
 		}
 	}
 
@@ -643,8 +639,6 @@ func runOvnKube(ctx context.Context, runMode *ovnkubeRunMode, ovnClientset *util
 // mode
 func newWatchFactory(runMode *ovnkubeRunMode, ovnClientset *util.OVNClientset) (watchFactory *factory.WatchFactory, err error) {
 	switch {
-	case runMode.clusterManager && runMode.ovnkubeController:
-		watchFactory, err = factory.NewMasterWatchFactory(ovnClientset.GetMasterClientset())
 	case runMode.clusterManager:
 		watchFactory, err = factory.NewClusterManagerWatchFactory(ovnClientset.GetClusterManagerClientset())
 	case runMode.ovnkubeController:
@@ -662,18 +656,12 @@ type leaderMetrics struct {
 }
 
 func (m leaderMetrics) On(string) {
-	if m.runMode.ovnkubeController {
-		metrics.MetricOVNKubeControllerLeader.Set(1)
-	}
 	if m.runMode.clusterManager {
 		metrics.MetricClusterManagerLeader.Set(1)
 	}
 }
 
 func (m leaderMetrics) Off(string) {
-	if m.runMode.ovnkubeController {
-		metrics.MetricOVNKubeControllerLeader.Set(0)
-	}
 	if m.runMode.clusterManager {
 		metrics.MetricClusterManagerLeader.Set(0)
 	}
@@ -687,13 +675,4 @@ type ovnkubeMetricsProvider struct {
 
 func (p ovnkubeMetricsProvider) NewLeaderMetric() leaderelection.LeaderMetric {
 	return &leaderMetrics{p.runMode}
-}
-
-func controllerManagerLockName() string {
-	// keep the same old lock name unless we are owners of a specific zone
-	name := "ovn-kubernetes-master"
-	if config.Default.Zone != types.OvnDefaultZone {
-		name = name + "-" + config.Default.Zone
-	}
-	return name
 }

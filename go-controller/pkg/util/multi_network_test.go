@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -11,11 +14,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/cache"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 func TestParseNetworkSubnets(t *testing.T) {
@@ -37,6 +41,36 @@ func TestParseNetworkSubnets(t *testing.T) {
 				},
 				{
 					CIDR:             ovntest.MustParseIPNet("fda6::/48"),
+					HostSubnetLength: 64,
+				},
+			},
+		},
+		{
+			desc:     "multiple ipv4 subnets layer3 topology",
+			topology: ovntypes.Layer3Topology,
+			subnets:  "192.168.1.0/24/28, 192.168.2.0/24/28",
+			expectedSubnets: []config.CIDRNetworkEntry{
+				{
+					CIDR:             ovntest.MustParseIPNet("192.168.1.0/24"),
+					HostSubnetLength: 28,
+				},
+				{
+					CIDR:             ovntest.MustParseIPNet("192.168.2.0/24"),
+					HostSubnetLength: 28,
+				},
+			},
+		},
+		{
+			desc:     "multiple ipv6 subnets layer3 topology",
+			topology: ovntypes.Layer3Topology,
+			subnets:  "fda6::/48, fda7::/48",
+			expectedSubnets: []config.CIDRNetworkEntry{
+				{
+					CIDR:             ovntest.MustParseIPNet("fda6::/48"),
+					HostSubnetLength: 64,
+				},
+				{
+					CIDR:             ovntest.MustParseIPNet("fda7::/48"),
 					HostSubnetLength: 64,
 				},
 			},
@@ -316,7 +350,7 @@ func TestParseNetconf(t *testing.T) {
 			inputNetAttachDefConfigSpec: `
     {
             "name": "tenantred",
-            "cniVersion": "1.0.0",
+            "cniVersion": "1.1.0",
             "plugins": [
               {
                 "type": "ovn-k8s-cni-overlay",
@@ -332,7 +366,7 @@ func TestParseNetconf(t *testing.T) {
 				NADName:  "ns1/nad1",
 				MTU:      1400,
 				VLANID:   10,
-				NetConf:  cnitypes.NetConf{Name: "tenantred", CNIVersion: "1.0.0", Type: "ovn-k8s-cni-overlay"},
+				NetConf:  cnitypes.NetConf{Name: "tenantred", CNIVersion: "1.1.0", Type: "ovn-k8s-cni-overlay"},
 			},
 		},
 		{
@@ -1004,7 +1038,21 @@ func TestGetPodNADToNetworkMapping(t *testing.T) {
 				},
 			}
 
-			isAttachmentRequested, networkMap, err := GetPodNADToNetworkMapping(pod, netInfo)
+			var resolver func(string) string
+			if netInfo.IsUserDefinedNetwork() {
+				expectedNADKey := test.inputNetConf.NADName
+				if expectedNADKey == "" {
+					t.Fatalf("missing NAD name for user-defined network %q", netInfo.GetNetworkName())
+				}
+				resolver = func(nadKey string) string {
+					if nadKey == expectedNADKey {
+						return netInfo.GetNetworkName()
+					}
+					return ""
+				}
+			}
+
+			isAttachmentRequested, networkMap, err := getPodNADToNetworkMapping(pod, netInfo, resolver)
 			if test.expectedError != nil {
 				g.Expect(err).To(gomega.HaveOccurred())
 				g.Expect(err).To(gomega.MatchError(test.expectedError))
@@ -1359,7 +1407,7 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 		{
 			desc:           "should fail when no nad of the active network found on the pod namespace",
 			inputNamespace: "non-existent-ns",
-			expectedError:  fmt.Errorf(`no active NAD found for namespace "non-existent-ns"`),
+			expectedError:  fmt.Errorf(`failed to get primary NAD for namespace "non-existent-ns": no active NAD found for namespace "non-existent-ns"`),
 			inputNetConf: &ovncnitypes.NetConf{
 				NetConf:  cnitypes.NetConf{Name: networkName},
 				NADName:  GetNADName(namespaceName, attachmentName),
@@ -1503,15 +1551,55 @@ func TestGetPodNADToNetworkMappingWithActiveNetwork(t *testing.T) {
 				pod.Namespace = test.inputNamespace
 			}
 
+			expectedNADKey := test.inputNetConf.NADName
+			if expectedNADKey == "" {
+				t.Fatalf("missing NAD name for user-defined network %q", netInfo.GetNetworkName())
+			}
+			nadNetworkNames := map[string]string{
+				expectedNADKey: netInfo.GetNetworkName(),
+			}
+			primaryNADByNamespace := map[string]string{}
+			if primaryUDNNetInfo != nil {
+				primaryNADKeys := make([]string, 0, 1+len(test.injectPrimaryUDNNADs))
+				if test.inputPrimaryUDNConfig != nil && test.inputPrimaryUDNConfig.NADName != "" {
+					primaryNADKeys = append(primaryNADKeys, test.inputPrimaryUDNConfig.NADName)
+				}
+				primaryNADKeys = append(primaryNADKeys, test.injectPrimaryUDNNADs...)
+				for _, nadKey := range primaryNADKeys {
+					nadNamespace, _, err := cache.SplitMetaNamespaceKey(nadKey)
+					if err != nil {
+						t.Fatalf("failed to split NAD key %q: %v", nadKey, err)
+					}
+					primaryNADByNamespace[nadNamespace] = nadKey
+					nadNetworkNames[nadKey] = primaryUDNNetInfo.GetNetworkName()
+				}
+			}
+			resolver := func(nadKey string) string {
+				if networkName, ok := nadNetworkNames[nadKey]; ok {
+					return networkName
+				}
+				return ""
+			}
+
 			isAttachmentRequested, networkSelectionElements, err := GetPodNADToNetworkMappingWithActiveNetwork(
 				pod,
 				netInfo,
 				primaryUDNNetInfo,
+				resolver,
+				func(namespace string) (string, error) {
+					if primaryUDNNetInfo == nil {
+						return ovntypes.DefaultNetworkName, nil
+					}
+					if nadKey, ok := primaryNADByNamespace[namespace]; ok {
+						return nadKey, nil
+					}
+					return "", fmt.Errorf("no active NAD found for namespace %q", namespace)
+				},
 			)
 
 			if test.expectedError != nil {
 				g.Expect(err).To(gomega.HaveOccurred(), "unexpected success operation, epecting error")
-				g.Expect(err).To(gomega.MatchError(test.expectedError))
+				g.Expect(err.Error()).To(gomega.Equal(test.expectedError.Error()))
 			} else {
 				g.Expect(err).ToNot(gomega.HaveOccurred())
 				g.Expect(isAttachmentRequested).To(gomega.Equal(test.expectedIsAttachmentRequested))
@@ -1675,6 +1763,70 @@ func TestSubnetOverlapCheck(t *testing.T) {
 	}
 }
 
+func TestValidateNetConfOutboundSNAT(t *testing.T) {
+	tests := []struct {
+		name          string
+		transport     string
+		outboundSNAT  string
+		expectedError string
+	}{
+		{
+			name:         "empty outboundSNAT is accepted without no-overlay transport",
+			outboundSNAT: "",
+		},
+		{
+			name:         "enabled outboundSNAT is accepted with no-overlay transport",
+			transport:    ovntypes.NetworkTransportNoOverlay,
+			outboundSNAT: ovntypes.NoOverlaySNATEnabled,
+		},
+		{
+			name:         "disabled outboundSNAT is accepted with no-overlay transport",
+			transport:    ovntypes.NetworkTransportNoOverlay,
+			outboundSNAT: ovntypes.NoOverlaySNATDisabled,
+		},
+		{
+			name:          "enabled outboundSNAT is rejected without no-overlay transport",
+			outboundSNAT:  ovntypes.NoOverlaySNATEnabled,
+			expectedError: `outboundSNAT is only valid when transport is "no-overlay"`,
+		},
+		{
+			name:          "enabled outboundSNAT is rejected with EVPN transport",
+			transport:     ovntypes.NetworkTransportEVPN,
+			outboundSNAT:  ovntypes.NoOverlaySNATEnabled,
+			expectedError: `outboundSNAT is only valid when transport is "no-overlay"`,
+		},
+		{
+			name:          "invalid outboundSNAT is rejected with no-overlay transport",
+			transport:     ovntypes.NetworkTransportNoOverlay,
+			outboundSNAT:  "maybe",
+			expectedError: `invalid outboundSNAT "maybe"`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			g := gomega.NewWithT(t)
+			nadName := "namespace/network"
+			netconf := &ovncnitypes.NetConf{
+				NetConf: cnitypes.NetConf{
+					Name: "network",
+				},
+				NADName:      nadName,
+				Topology:     ovntypes.Layer3Topology,
+				Transport:    test.transport,
+				OutboundSNAT: test.outboundSNAT,
+			}
+
+			err := ValidateNetConf(nadName, netconf)
+			if test.expectedError != "" {
+				g.Expect(err).To(gomega.MatchError(gomega.ContainSubstring(test.expectedError)))
+			} else {
+				g.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+		})
+	}
+}
+
 func TestNewNetInfo(t *testing.T) {
 	type testConfig struct {
 		desc          string
@@ -1773,6 +1925,13 @@ func TestAreNetworksCompatible(t *testing.T) {
 			anotherNetwork:         &userDefinedNetInfo{physicalNetworkName: "B"},
 			expectedResult:         false,
 			expectationDescription: "we should reconcile on physical network name updates",
+		},
+		{
+			desc:                   "networks with empty (default) transport should be compatible",
+			aNetwork:               &userDefinedNetInfo{transport: ""},
+			anotherNetwork:         &userDefinedNetInfo{transport: ""},
+			expectedResult:         true,
+			expectationDescription: "networks with no EVPN config should be compatible",
 		},
 	}
 
@@ -1950,8 +2109,10 @@ func TestEVPNConfig(t *testing.T) {
 		expectedVTEPName          string
 		expectedMACVRFVNI         int32
 		expectedMACVRFRouteTarget string
+		expectedMACVRFVID         int
 		expectedIPVRFVNI          int32
 		expectedIPVRFRouteTarget  string
+		expectedIPVRFVID          int
 	}
 
 	tests := []testConfig{
@@ -2049,18 +2210,33 @@ func TestEVPNConfig(t *testing.T) {
 			expectedIPVRFRouteTarget:  "65000:1000",
 		},
 		{
-			desc: "layer2 network with nooverlay transport",
+			desc: "layer2 network with EVPN transport including VIDs (allocated by controller)",
 			inputNetConf: &ovncnitypes.NetConf{
-				NetConf:   cnitypes.NetConf{Name: "nooverlay-network"},
+				NetConf:   cnitypes.NetConf{Name: "evpn-with-vids"},
 				Topology:  ovntypes.Layer2Topology,
-				Transport: "nooverlay",
+				Transport: "evpn",
+				EVPN: &ovncnitypes.EVPNConfig{
+					VTEP: "vid-vtep",
+					MACVRF: &ovncnitypes.VRFConfig{
+						VNI:         100,
+						RouteTarget: "65000:100",
+						VID:         12,
+					},
+					IPVRF: &ovncnitypes.VRFConfig{
+						VNI:         1000,
+						RouteTarget: "65000:1000",
+						VID:         13,
+					},
+				},
 			},
-			expectedTransport:         "nooverlay",
-			expectedVTEPName:          "",
-			expectedMACVRFVNI:         0,
-			expectedMACVRFRouteTarget: "",
-			expectedIPVRFVNI:          0,
-			expectedIPVRFRouteTarget:  "",
+			expectedTransport:         "evpn",
+			expectedVTEPName:          "vid-vtep",
+			expectedMACVRFVNI:         100,
+			expectedMACVRFRouteTarget: "65000:100",
+			expectedMACVRFVID:         12,
+			expectedIPVRFVNI:          1000,
+			expectedIPVRFRouteTarget:  "65000:1000",
+			expectedIPVRFVID:          13,
 		},
 		{
 			desc: "EVPN config with VNI only (no route target)",
@@ -2094,8 +2270,10 @@ func TestEVPNConfig(t *testing.T) {
 			g.Expect(netInfo.EVPNVTEPName()).To(gomega.Equal(test.expectedVTEPName), "VTEP name mismatch")
 			g.Expect(netInfo.EVPNMACVRFVNI()).To(gomega.Equal(test.expectedMACVRFVNI), "MAC-VRF VNI mismatch")
 			g.Expect(netInfo.EVPNMACVRFRouteTarget()).To(gomega.Equal(test.expectedMACVRFRouteTarget), "MAC-VRF RouteTarget mismatch")
+			g.Expect(netInfo.EVPNMACVRFVID()).To(gomega.Equal(test.expectedMACVRFVID), "MAC-VRF VID mismatch")
 			g.Expect(netInfo.EVPNIPVRFVNI()).To(gomega.Equal(test.expectedIPVRFVNI), "IP-VRF VNI mismatch")
 			g.Expect(netInfo.EVPNIPVRFRouteTarget()).To(gomega.Equal(test.expectedIPVRFRouteTarget), "IP-VRF RouteTarget mismatch")
+			g.Expect(netInfo.EVPNIPVRFVID()).To(gomega.Equal(test.expectedIPVRFVID), "IP-VRF VID mismatch")
 		})
 	}
 }
@@ -2118,7 +2296,7 @@ func TestEVPNNetworkCompatibility(t *testing.T) {
 		{
 			desc:                   "different transport should not be compatible",
 			aNetwork:               &userDefinedNetInfo{transport: "evpn"},
-			anotherNetwork:         &userDefinedNetInfo{transport: "nooverlay"},
+			anotherNetwork:         &userDefinedNetInfo{transport: "no-overlay"},
 			expectedResult:         false,
 			expectationDescription: "networks with different transport should not be compatible",
 		},
@@ -2169,8 +2347,8 @@ func TestEVPNNetworkCompatibility(t *testing.T) {
 		},
 		{
 			desc:                   "both nil EVPN config should be compatible",
-			aNetwork:               &userDefinedNetInfo{transport: "geneve"},
-			anotherNetwork:         &userDefinedNetInfo{transport: "geneve"},
+			aNetwork:               &userDefinedNetInfo{transport: ""},
+			anotherNetwork:         &userDefinedNetInfo{transport: ""},
 			expectedResult:         true,
 			expectationDescription: "networks with no EVPN config should be compatible",
 		},

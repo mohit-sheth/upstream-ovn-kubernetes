@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package networkconnect
 
 import (
@@ -20,19 +23,19 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	controllerutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
-	networkconnectv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
-	networkconnectfake "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned/fake"
-	apitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/types"
-	userdefinednetworkv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
+	networkconnectfake "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned/fake"
+	apitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+	userdefinednetworkv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // NOTE: This file tests the elements of the networkconnect controller
@@ -745,6 +748,7 @@ func TestController_reconcileClusterNetworkConnect(t *testing.T) {
 			// Create fake network manager and auto-configure from nads and namespaces
 			fakeNM := &networkmanager.FakeNetworkManager{
 				PrimaryNetworks: make(map[string]util.NetInfo),
+				NADNetworks:     make(map[string]util.NetInfo),
 			}
 
 			// Auto-populate PrimaryNetworks from NADs with IsUDN=true and IsPrimary=true
@@ -768,7 +772,17 @@ func TestController_reconcileClusterNetworkConnect(t *testing.T) {
 				for _, n := range nads {
 					mutableNetInfo.AddNADs(fmt.Sprintf("%s/%s", n.Namespace, n.Name))
 				}
+				fakeNM.Lock()
 				fakeNM.PrimaryNetworks[namespace] = mutableNetInfo
+				fakeNM.Unlock()
+			}
+			for _, nad := range tt.nads {
+				nadKey := fmt.Sprintf("%s/%s", nad.Namespace, nad.Name)
+				nadObj, err := wf.NADInformer().Lister().NetworkAttachmentDefinitions(nad.Namespace).Get(nad.Name)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "NAD %s should exist", nadKey)
+				netInfo, err := util.ParseNADInfo(nadObj)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "ParseNADInfo for %s failed", nadKey)
+				fakeNM.NADNetworks[nadKey] = netInfo
 			}
 
 			// Auto-configure UDN namespaces from namespaces with RequiresUDN=true
@@ -922,7 +936,7 @@ func TestCNCNeedsUpdate(t *testing.T) {
 			},
 			newObj: &networkconnectv1.ClusterNetworkConnect{
 				Spec: networkconnectv1.ClusterNetworkConnectSpec{
-					Connectivity: []networkconnectv1.ConnectivityType{networkconnectv1.ClusterIPServiceNetwork},
+					Connectivity: []networkconnectv1.ConnectivityType{networkconnectv1.ServiceNetwork},
 				},
 			},
 			wantUpdate: false,
@@ -1162,6 +1176,16 @@ func TestController_reconcileNAD(t *testing.T) {
 
 			fakeNM := &networkmanager.FakeNetworkManager{
 				PrimaryNetworks: make(map[string]util.NetInfo),
+				NADNetworks:     make(map[string]util.NetInfo),
+			}
+
+			for _, nad := range tt.nads {
+				nadKey := fmt.Sprintf("%s/%s", nad.Namespace, nad.Name)
+				nadObj, err := wf.NADInformer().Lister().NetworkAttachmentDefinitions(nad.Namespace).Get(nad.Name)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "NAD %s should exist", nadKey)
+				netInfo, err := util.ParseNADInfo(nadObj)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "ParseNADInfo for %s failed", nadKey)
+				fakeNM.NADNetworks[nadKey] = netInfo
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
@@ -1231,177 +1255,6 @@ func TestController_reconcileNAD(t *testing.T) {
 					return reconciledCNCs.UnsortedList()
 				}).Should(gomega.ConsistOf(tt.expectCNCReconciled))
 			}
-		})
-	}
-}
-
-func TestNADNeedsUpdate(t *testing.T) {
-	cudnOwner := makeCUDNOwnerRef("test-cudn")
-	udnOwner := makeUDNOwnerRef("test-udn")
-
-	makePrimaryNADConfig := func(name string) string {
-		return fmt.Sprintf(`{"cniVersion": "0.4.0", "name": "%s", "type": "ovn-k8s-cni-overlay", "topology": "layer3", "role": "primary", "netAttachDefName": "test/%s"}`, name, name)
-	}
-
-	makeSecondaryNADConfig := func(name string) string {
-		return fmt.Sprintf(`{"cniVersion": "0.4.0", "name": "%s", "type": "ovn-k8s-cni-overlay", "topology": "layer3", "netAttachDefName": "test/%s"}`, name, name)
-	}
-
-	tests := []struct {
-		name       string
-		oldObj     *nadv1.NetworkAttachmentDefinition
-		newObj     *nadv1.NetworkAttachmentDefinition
-		wantUpdate bool
-	}{
-		{
-			name:   "NAD without owner is ignored",
-			oldObj: nil,
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "test"},
-				Spec:       nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			wantUpdate: false,
-		},
-		{
-			name:   "CUDN NAD being created",
-			oldObj: nil,
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			wantUpdate: true,
-		},
-		{
-			name: "CUDN NAD being deleted",
-			oldObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			newObj:     nil,
-			wantUpdate: true,
-		},
-		{
-			name:   "UDN NAD being created",
-			oldObj: nil,
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{udnOwner},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			wantUpdate: true,
-		},
-		{
-			name: "UDN NAD being deleted",
-			oldObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{udnOwner},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			newObj:     nil,
-			wantUpdate: true,
-		},
-		{
-			name: "NAD labels changed",
-			oldObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-					Labels:          map[string]string{"old": "label"},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-					Labels:          map[string]string{"new": "label"},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			wantUpdate: true,
-		},
-		{
-			name: "NAD network ID annotation changed",
-			oldObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-					Annotations:     map[string]string{types.OvnNetworkIDAnnotation: "1"},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-					Annotations:     map[string]string{types.OvnNetworkIDAnnotation: "2"},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			wantUpdate: true,
-		},
-		{
-			name: "NAD unchanged",
-			oldObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-					Labels:          map[string]string{"same": "label"},
-					Annotations:     map[string]string{types.OvnNetworkIDAnnotation: "1"},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-					Labels:          map[string]string{"same": "label"},
-					Annotations:     map[string]string{types.OvnNetworkIDAnnotation: "1"},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makePrimaryNADConfig("test")},
-			},
-			wantUpdate: false,
-		},
-		{
-			name:   "secondary NAD is ignored",
-			oldObj: nil,
-			newObj: &nadv1.NetworkAttachmentDefinition{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:            "test",
-					Namespace:       "test",
-					OwnerReferences: []metav1.OwnerReference{cudnOwner},
-				},
-				Spec: nadv1.NetworkAttachmentDefinitionSpec{Config: makeSecondaryNADConfig("test")},
-			},
-			wantUpdate: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			g := gomega.NewWithT(t)
-			result := nadNeedsUpdate(tt.oldObj, tt.newObj)
-			g.Expect(result).To(gomega.Equal(tt.wantUpdate))
 		})
 	}
 }
@@ -1757,6 +1610,7 @@ func TestMustProcessCNCForNAD(t *testing.T) {
 
 			fakeNM := &networkmanager.FakeNetworkManager{
 				PrimaryNetworks: make(map[string]util.NetInfo),
+				NADNetworks:     make(map[string]util.NetInfo),
 			}
 
 			// Auto-configure primary network from NAD when IsUDN && IsPrimary
@@ -1769,7 +1623,16 @@ func TestMustProcessCNCForNAD(t *testing.T) {
 				g.Expect(err).ToNot(gomega.HaveOccurred())
 				mutableNetInfo := util.NewMutableNetInfo(netInfo)
 				mutableNetInfo.SetNADs(tt.nad.Namespace + "/" + tt.nad.Name)
+				fakeNM.Lock()
 				fakeNM.PrimaryNetworks[tt.nad.Namespace] = mutableNetInfo
+				fakeNM.Unlock()
+			}
+			if tt.nad != nil {
+				nadKey := fmt.Sprintf("%s/%s", tt.nad.Namespace, tt.nad.Name)
+				nadObj := tt.nad.NAD()
+				netInfo, err := util.ParseNADInfo(nadObj)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "ParseNADInfo for %s failed", nadKey)
+				fakeNM.NADNetworks[nadKey] = netInfo
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")
@@ -2451,6 +2314,7 @@ func TestController_reconcileNamespace(t *testing.T) {
 			// Create fake network manager and auto-configure from nads
 			fakeNM := &networkmanager.FakeNetworkManager{
 				PrimaryNetworks: make(map[string]util.NetInfo),
+				NADNetworks:     make(map[string]util.NetInfo),
 			}
 
 			// Auto-populate PrimaryNetworks from NADs with IsUDN=true and IsPrimary=true
@@ -2471,7 +2335,17 @@ func TestController_reconcileNamespace(t *testing.T) {
 				for _, n := range nads {
 					mutableNetInfo.AddNADs(fmt.Sprintf("%s/%s", n.Namespace, n.Name))
 				}
+				fakeNM.Lock()
 				fakeNM.PrimaryNetworks[namespace] = mutableNetInfo
+				fakeNM.Unlock()
+			}
+			for _, nad := range tt.nads {
+				nadKey := fmt.Sprintf("%s/%s", nad.Namespace, nad.Name)
+				nadObj, err := wf.NADInformer().Lister().NetworkAttachmentDefinitions(nad.Namespace).Get(nad.Name)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "NAD %s should exist", nadKey)
+				netInfo, err := util.ParseNADInfo(nadObj)
+				g.Expect(err).ToNot(gomega.HaveOccurred(), "ParseNADInfo for %s failed", nadKey)
+				fakeNM.NADNetworks[nadKey] = netInfo
 			}
 
 			tunnelKeysAllocator := id.NewTunnelKeyAllocator("TunnelKeys")

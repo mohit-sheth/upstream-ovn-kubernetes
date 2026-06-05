@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package apbroute
 
 import (
@@ -13,12 +16,12 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminpolicybasedrouteapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute/gateway_info"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminpolicybasedrouteapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute/gateway_info"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type managedGWIPs struct {
@@ -155,7 +158,7 @@ func (c *ExternalGatewayMasterController) Repair() error {
 		// if pod had no ECMP routes we need to make sure we remove logical route policy for local gw mode
 		if !podHasAnyECMPRoutes {
 			for _, ovnRoute := range ovnRoutes {
-				node := strings.TrimPrefix(ovnRoute.router, types.GWRouterPrefix)
+				node := util.GetWorkerFromGatewayRouter(ovnRoute.router)
 				if err := c.nbClient.delHybridRoutePolicyForPod(net.ParseIP(podIP), node); err != nil {
 					return fmt.Errorf("error while removing hybrid policy for pod IP: %s, on node: %s, error: %v",
 						podIP, node, err)

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (
@@ -9,23 +12,26 @@ import (
 	"path/filepath"
 
 	"github.com/containernetworking/cni/libcni"
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/version"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 var ErrorAttachDefNotOvnManaged = errors.New("net-attach-def not managed by OVN")
 var ErrorChainingNotSupported = errors.New("CNI plugin chaining is not supported")
+
+// CNISpecVersion is the CNI spec version used when OVN-Kubernetes renders CNI config.
+const CNISpecVersion = "1.1.0"
 
 // WriteCNIConfig writes a CNI JSON config file to directory given by global config
 // if the file doesn't already exist, or is different than the content that would
 // be written.
 func WriteCNIConfig() error {
 	netConf := &ovncnitypes.NetConf{
-		NetConf: types.NetConf{
-			CNIVersion: "0.4.0",
+		NetConf: cnitypes.NetConf{
+			CNIVersion: CNISpecVersion,
 			Name:       "ovn-kubernetes",
 			Type:       CNI.Plugin,
 		},
@@ -74,9 +80,17 @@ func WriteCNIConfig() error {
 // ParseNetConf parses config in NAD spec
 func ParseNetConf(bytes []byte) (*ovncnitypes.NetConf, error) {
 	var netconf *ovncnitypes.NetConf
+	var err error
 
-	confList, err := libcni.ConfListFromBytes(bytes)
-	if err == nil {
+	var raw struct {
+		Plugins json.RawMessage `json:"plugins"`
+	}
+	if unmarshalErr := json.Unmarshal(bytes, &raw); unmarshalErr == nil && raw.Plugins != nil {
+		var confList *libcni.NetworkConfigList
+		confList, err = libcni.ConfListFromBytes(bytes)
+		if err != nil {
+			return nil, err
+		}
 		netconf, err = parseNetConfList(confList)
 		if err == nil {
 			if _, singleErr := parseNetConfSingle(bytes); singleErr == nil {
@@ -120,6 +134,9 @@ func parseNetConfSingle(bytes []byte) (*ovncnitypes.NetConf, error) {
 }
 
 func parseNetConfList(confList *libcni.NetworkConfigList) (*ovncnitypes.NetConf, error) {
+	if len(confList.Plugins) == 0 {
+		return nil, fmt.Errorf("error parsing configuration list %q: no plugins found", confList.Name)
+	}
 	netconf := &ovncnitypes.NetConf{MTU: Default.MTU}
 	if err := json.Unmarshal(confList.Plugins[0].Bytes, netconf); err != nil {
 		return nil, err

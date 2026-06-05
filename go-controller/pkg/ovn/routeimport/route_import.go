@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package routeimport
 
 import (
@@ -12,18 +15,17 @@ import (
 	"golang.org/x/sys/unix"
 
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
 	"github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	controllerutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
-	nbdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	nbdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const (
@@ -78,7 +80,6 @@ func New(node string, nbClient client.Client) Controller {
 		&controllerutil.ReconcilerConfig{
 			Threadiness: 1,
 			Reconcile:   c.syncNetwork,
-			RateLimiter: workqueue.NewTypedItemFastSlowRateLimiter[string](time.Second, 5*time.Second, 5),
 		},
 	)
 
@@ -343,11 +344,13 @@ func (c *controller) syncNetwork(network string) error {
 	c.setTableForNetworkUnlocked(info.GetNetworkID(), table)
 	c.Unlock()
 
-	// skip routes in the pod network
-	// TODO do not skip these routes in no overlay mode
-	ignoreSubnets := make([]*net.IPNet, len(info.Subnets()))
-	for i, subnet := range info.Subnets() {
-		ignoreSubnets[i] = subnet.CIDR
+	var ignoreSubnets []*net.IPNet
+	if info.Transport() != types.NetworkTransportNoOverlay {
+		// if the network is overlay mode, skip routes to the pod network
+		ignoreSubnets = make([]*net.IPNet, len(info.Subnets()))
+		for i, subnet := range info.Subnets() {
+			ignoreSubnets[i] = subnet.CIDR
+		}
 	}
 
 	expected, err := c.getBGPRoutes(table, ignoreSubnets)
@@ -431,6 +434,7 @@ func (c *controller) getBGPRoutes(table int, ignoreSubnets []*net.IPNet) (sets.S
 	routes := sets.New[route]()
 	for _, nlroute := range nlroutes {
 		if util.IsContainedInAnyCIDR(nlroute.Dst, ignoreSubnets...) {
+			c.log.V(5).Info("Ignore BGP route", "table", table, "route", stringer{nlroute})
 			continue
 		}
 		routes.Insert(routesFromNetlinkRoute(&nlroute)...)

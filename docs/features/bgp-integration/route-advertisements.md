@@ -18,6 +18,8 @@ Layer 2 cluster-user-defined networks (CUDNs) are supported.
 
 - [FRR-k8s](https://github.com/metallb/frr-k8s)
 
+Always check the dependencies on the [Requirements page](../requirements.md)
+
 ## Motivation
 
 There are multiple driving factors which necessitate integrating BGP into
@@ -1000,8 +1002,11 @@ TBD
 
 ## Future Items
 
-- EVPN support
 - No overlay support
+
+## Related Features
+
+- [EVPN](./evpn.md)
 
 ## Known Limitations
 

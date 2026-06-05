@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
 	"fmt"
 
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
@@ -5,8 +8,8 @@ import (
 
 	corev1listers "k8s.io/client-go/listers/core/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // updatePodDPUConnDetailsWithRetry update the pod annotation with the given connection details for the NAD in
@@ -34,20 +37,16 @@ func (pr *PodRequest) addDPUConnectionDetailsAnnot(k kube.Interface, podLister c
 	if pr.CNIConf.DeviceID == "" {
 		return fmt.Errorf("DeviceID must be set for Pod request with DPU")
 	}
-	pciAddress := pr.CNIConf.DeviceID
+	deviceID := pr.CNIConf.DeviceID
 
-	vfindex, err := util.GetSriovnetOps().GetVfIndexByPciAddress(pciAddress)
+	details, err := util.GetDPUOps().ResolveDeviceDetails(deviceID)
 	if err != nil {
-		return err
-	}
-	pfindex, err := util.GetSriovnetOps().GetPfIndexByVfPciAddress(pciAddress)
-	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve device details for %s: %v", deviceID, err)
 	}
 
 	dpuConnDetails := util.DPUConnectionDetails{
-		PfId:         fmt.Sprint(pfindex),
-		VfId:         fmt.Sprint(vfindex),
+		PfId:         fmt.Sprint(details.PfId),
+		VfId:         fmt.Sprint(details.FuncId),
 		SandboxId:    pr.SandboxID,
 		VfNetdevName: vfNetdevName,
 	}

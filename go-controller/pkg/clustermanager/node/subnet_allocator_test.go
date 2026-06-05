@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -7,7 +10,7 @@ import (
 
 	utilnet "k8s.io/utils/net"
 
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
 )
 
 const testNodeName string = "test"

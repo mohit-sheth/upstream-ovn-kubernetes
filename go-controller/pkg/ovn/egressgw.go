@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -21,14 +24,14 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	apbroutecontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	apbroutecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type gatewayInfo struct {
@@ -97,7 +100,7 @@ func (oc *DefaultNetworkController) addPodExternalGWForNamespace(namespace strin
 	for _, gwInfo := range nsInfo.routingExternalPodGWs {
 		existingGWs.Insert(gwInfo.gws.UnsortedList()...)
 	}
-	if config.OVNKubernetesFeature.EnableInterconnect && oc.zone != types.OvnDefaultZone {
+	if oc.zone != types.OvnDefaultZone {
 		existingGWs.Insert(nsInfo.routingExternalGWs.gws.UnsortedList()...)
 	}
 	nsUnlock()
@@ -109,12 +112,12 @@ func (oc *DefaultNetworkController) addPodExternalGWForNamespace(namespace strin
 		return err
 	}
 	// add the exgw podIP to the namespace's k8s.ovn.org/external-gw-pod-ips list
-	if !config.OVNKubernetesFeature.EnableInterconnect || oc.zone == types.OvnDefaultZone {
-		// If interconnect is disabled OR interconnect is running in single-zone-mode,
-		// the ovnkube-master is responsible for patching ICNI managed namespaces with
-		// "k8s.ovn.org/external-gw-pod-ips". In that case, we need ovnkube-node to flush
-		// conntrack on every node. In multi-zone-interconnect case, we will handle the flushing
-		// directly on the ovnkube-controller code to avoid an extra namespace annotation
+	if oc.zone == types.OvnDefaultZone {
+		// In single-zone deployments (default zone), ovnkube-controller patches
+		// the "k8s.ovn.org/external-gw-pod-ips" namespace annotation; ovnkube-node
+		// watches it and flushes conntrack on every node. In multi-zone
+		// interconnect, ovnkube-controller flushes conntrack directly and skips
+		// the annotation.
 		if err := util.UpdateExternalGatewayPodIPsAnnotation(oc.kube, namespace, existingGWs.List()); err != nil {
 			klog.Errorf("Unable to update %s/%v annotation for namespace %s: %v", util.ExternalGatewayPodIPsAnnotation, existingGWs, namespace, err)
 		}
@@ -374,7 +377,7 @@ func (oc *DefaultNetworkController) deletePodGWRoutesForNamespace(pod *corev1.Po
 	for _, gwInfo := range nsInfo.routingExternalPodGWs {
 		existingGWs.Insert(gwInfo.gws.UnsortedList()...)
 	}
-	if config.OVNKubernetesFeature.EnableInterconnect && oc.zone != types.OvnDefaultZone {
+	if oc.zone != types.OvnDefaultZone {
 		existingGWs.Insert(nsInfo.routingExternalGWs.gws.UnsortedList()...)
 	}
 	nsUnlock()
@@ -397,12 +400,12 @@ func (oc *DefaultNetworkController) deletePodGWRoutesForNamespace(pod *corev1.Po
 		return fmt.Errorf("failed to delete GW routes for pod %s: %w", pod.Name, err)
 	}
 	// remove the exgw podIP from the namespace's k8s.ovn.org/external-gw-pod-ips list
-	if !config.OVNKubernetesFeature.EnableInterconnect || oc.zone == types.OvnDefaultZone {
-		// If interconnect is disabled OR interconnect is running in single-zone-mode,
-		// the ovnkube-master is responsible for patching ICNI managed namespaces with
-		// "k8s.ovn.org/external-gw-pod-ips". In that case, we need ovnkube-node to flush
-		// conntrack on every node. In multi-zone-interconnect case, we will handle the flushing
-		// directly on the ovnkube-controller code to avoid an extra namespace annotation
+	if oc.zone == types.OvnDefaultZone {
+		// In single-zone deployments (default zone), ovnkube-controller patches
+		// the "k8s.ovn.org/external-gw-pod-ips" namespace annotation; ovnkube-node
+		// watches it and flushes conntrack on every node. In multi-zone
+		// interconnect, ovnkube-controller flushes conntrack directly and skips
+		// the annotation.
 		if err := util.UpdateExternalGatewayPodIPsAnnotation(oc.kube, namespace, sets.List(existingGWs)); err != nil {
 			klog.Errorf("Unable to update %s/%v annotation for namespace %s: %v", util.ExternalGatewayPodIPsAnnotation, existingGWs, namespace, err)
 		}
@@ -601,8 +604,10 @@ func (oc *DefaultNetworkController) deletePodSNAT(nodeName string, extIPs, podIP
 	return nil
 }
 
-// buildPodSNAT builds per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides
-func buildPodSNAT(extIPs, podIPNets []*net.IPNet, match string) ([]*nbdb.NAT, error) {
+// buildPodSNAT builds per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides.
+// exemptedExtIPs should be an AddressSet UUID.
+// When specified, traffic to IPs in that AddressSet will not be SNATed.
+func buildPodSNAT(extIPs, podIPNets []*net.IPNet, match string, exemptedExtIPs string) ([]*nbdb.NAT, error) {
 	nats := make([]*nbdb.NAT, 0, len(extIPs)*len(podIPNets))
 	for _, podIPNet := range podIPNets {
 		fullMaskPodNet := &net.IPNet{
@@ -610,13 +615,13 @@ func buildPodSNAT(extIPs, podIPNets []*net.IPNet, match string) ([]*nbdb.NAT, er
 			Mask: util.GetIPFullMask(podIPNet.IP),
 		}
 		if len(extIPs) == 0 {
-			nats = append(nats, libovsdbops.BuildSNATWithMatch(nil, fullMaskPodNet, "", nil, match))
+			nats = append(nats, libovsdbops.BuildSNATWithExemptedExtIPs(nil, fullMaskPodNet, "", nil, match, exemptedExtIPs))
 		} else {
 			for _, gwIPNet := range extIPs {
 				if utilnet.IsIPv6CIDR(gwIPNet) != utilnet.IsIPv6CIDR(podIPNet) {
 					continue
 				}
-				nats = append(nats, libovsdbops.BuildSNATWithMatch(&gwIPNet.IP, fullMaskPodNet, "", nil, match))
+				nats = append(nats, libovsdbops.BuildSNATWithExemptedExtIPs(&gwIPNet.IP, fullMaskPodNet, "", nil, match, exemptedExtIPs))
 			}
 		}
 	}
@@ -640,7 +645,7 @@ func getExternalIPsGR(watchFactory *factory.WatchFactory, nodeName string) ([]*n
 // deletePodSNATOps creates ovsdb operation that removes per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides
 // used when disableSNATMultipleGWs=true
 func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwRouterName string, extIPs, podIPNets []*net.IPNet) ([]ovsdb.Operation, error) {
-	nats, err := buildPodSNAT(extIPs, podIPNets, "") // for delete, match is not needed - we try to cleanup all the SNATs that match the isEquivalentNAT predicate
+	nats, err := buildPodSNAT(extIPs, podIPNets, "", "") // for delete, match and exemptedExtIPs are not needed - we try to cleanup all the SNATs that match the isEquivalentNAT predicate
 	if err != nil {
 		return nil, err
 	}
@@ -657,7 +662,7 @@ func deletePodSNATOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, gwR
 // addOrUpdatePodSNAT adds or updates per pod SNAT rules towards the nodeIP that are applied to the GR where the pod resides
 // used when disableSNATMultipleGWs=true
 func addOrUpdatePodSNAT(nbClient libovsdbclient.Client, gwRouterName string, extIPs, podIfAddrs []*net.IPNet) error {
-	ops, err := addOrUpdatePodSNATOps(nbClient, gwRouterName, extIPs, podIfAddrs, "", nil)
+	ops, err := addOrUpdatePodSNATOps(nbClient, gwRouterName, extIPs, podIfAddrs, "", "", nil)
 	if err != nil {
 		return err
 	}
@@ -668,11 +673,13 @@ func addOrUpdatePodSNAT(nbClient libovsdbclient.Client, gwRouterName string, ext
 }
 
 // addOrUpdatePodSNATOps returns the operation that adds or updates per pod SNAT rules towards the nodeIP that are
-// applied to the GR where the pod resides
+// applied to the GR where the pod resides.
+// exemptedExtIPs should be an AddressSet UUID.
+// When specified, traffic to IPs in that AddressSet will not be SNATed.
 // used when disableSNATMultipleGWs=true
-func addOrUpdatePodSNATOps(nbClient libovsdbclient.Client, gwRouterName string, extIPs, podIfAddrs []*net.IPNet, snatMatch string, ops []ovsdb.Operation) ([]ovsdb.Operation, error) {
+func addOrUpdatePodSNATOps(nbClient libovsdbclient.Client, gwRouterName string, extIPs, podIfAddrs []*net.IPNet, snatMatch string, exemptedExtIPs string, ops []ovsdb.Operation) ([]ovsdb.Operation, error) {
 	gwRouter := &nbdb.LogicalRouter{Name: gwRouterName}
-	nats, err := buildPodSNAT(extIPs, podIfAddrs, snatMatch)
+	nats, err := buildPodSNAT(extIPs, podIfAddrs, snatMatch, exemptedExtIPs)
 	if err != nil {
 		return nil, err
 	}

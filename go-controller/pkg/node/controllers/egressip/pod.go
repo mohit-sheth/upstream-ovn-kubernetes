@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package egressip
 
 import (
@@ -16,7 +19,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iptables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/iptables"
 )
 
 // podIPConfig holds pod specific info to implement egress IP for secondary host networks for a single pod IP. A pod may

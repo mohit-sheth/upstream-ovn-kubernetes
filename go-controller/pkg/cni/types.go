@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
@@ -17,9 +20,9 @@ import (
 
 	"github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // ServerRunDir is the default directory for CNIServer runtime files
@@ -80,6 +83,12 @@ const CNIDel command = "DEL"
 
 // CNICheck is the command representing check operation on a pod
 const CNICheck command = "CHECK"
+
+// CNIStatus is the command representing a plugin readiness check
+const CNIStatus command = "STATUS"
+
+// CNIGC is the command representing CNI runtime garbage collection
+const CNIGC command = "GC"
 
 // Request sent to the Server by the OVN CNI plugin
 type Request struct {
@@ -154,17 +163,15 @@ type PodRequest struct {
 	// Interface name to be configured
 	IfName string
 	// CNI conf obtained from stdin conf
-	CNIConf *types.NetConf
+	CNIConf *ovncnitypes.NetConf
 	// Timestamp when the request was started
 	timestamp time.Time
 	// ctx is a context tracking this request's lifetime
 	ctx context.Context
-	// cancel should be called to cancel this request
-	cancel context.CancelFunc
 	// if CNIConf.DeviceID is present, then captures if the VF is of type VFIO or not
 	IsVFIO bool
 
-	// network name, for default network, this will be types.DefaultNetworkName
+	// network name, for default network, this will be ovncnitypes.DefaultNetworkName
 	netName string
 
 	// for ovs interfaces plumbed for UDNs, their iface-id's prefix is derived from the specific nadName;
@@ -179,9 +186,6 @@ type PodRequest struct {
 	// the DeviceInfo struct
 	deviceInfo nadapi.DeviceInfo
 }
-
-type podRequestFunc func(request *PodRequest, clientset *ClientSet, kubeAuth *KubeAPIAuth, networkManager networkmanager.Interface, ovsClient client.Client) ([]byte, error)
-type getCNIResultFunc func(request *PodRequest, getter PodInfoGetter, podInterfaceInfo *PodInterfaceInfo) (*current.Result, error)
 
 type PodInfoGetter interface {
 	getPod(namespace, name string) (*corev1.Pod, error)
@@ -201,13 +205,18 @@ func NewClientSet(kclient kubernetes.Interface, podLister corev1listers.PodListe
 	}
 }
 
+// DPUStatusProvider reports whether the DPU is ready to service CNI requests.
+type DPUStatusProvider interface {
+	Ready() (bool, string)
+}
+
 // Server object that listens for JSON-marshaled Request objects
 // on a private root-only Unix domain socket.
 type Server struct {
 	http.Server
-	handlePodRequestFunc podRequestFunc
-	clientSet            *ClientSet
-	kubeAuth             *KubeAPIAuth
-	networkManager       networkmanager.Interface
-	ovsClient            client.Client
+	clientSet      *ClientSet
+	kubeAuth       *KubeAPIAuth
+	networkManager networkmanager.Interface
+	ovsClient      client.Client
+	dpuHealth      DPUStatusProvider
 }

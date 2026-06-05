@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package clustermanager
 
 import (
@@ -26,17 +29,17 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
-	objretry "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
+	objretry "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const (
@@ -447,7 +450,7 @@ func (eIPC *egressIPClusterController) newRetryFramework(objectType reflect.Type
 		ObjType:                objectType,
 		EventHandler:           eventHandler,
 	}
-	return objretry.NewRetryFramework(eIPC.stopChan, eIPC.wg, eIPC.watchFactory, resourceHandler)
+	return objretry.NewRetryFramework("EgressIPClusterController", eIPC.stopChan, eIPC.wg, eIPC.watchFactory, resourceHandler)
 }
 
 func (eIPC *egressIPClusterController) Start() error {
@@ -531,7 +534,26 @@ func (eIPC *egressIPClusterController) getSortedEgressData() ([]*egressNode, map
 	return assignableNodes, allAllocations
 }
 
-func (eIPC *egressIPClusterController) initEgressNodeReachability(_ []interface{}) error {
+func (eIPC *egressIPClusterController) initEgressNodeReachability(objs []interface{}) error {
+	for _, obj := range objs {
+		node := obj.(*corev1.Node)
+		if err := eIPC.initEgressIPAllocator(node); err != nil {
+			klog.Warningf("Egress node initialization error: %v", err)
+		}
+	}
+
+	// Before reconciling unassigned EgressIPs, ensure the allocator cache is populated
+	// with existing assignments from EgressIP statuses. This prevents duplicate IP
+	// assignments when two EgressIPs have the same IP in their specs but only one has
+	// it assigned in status (e.g., after control-plane restart or during initial sync).
+	egressIPs, err := eIPC.kube.GetEgressIPs()
+	if err != nil {
+		return fmt.Errorf("unable to list EgressIPs, err: %v", err)
+	}
+	for _, egressIP := range egressIPs {
+		eIPC.ensureAllocatorEgressIPAssignments(egressIP)
+	}
+
 	go eIPC.checkEgressNodesReachability()
 	return nil
 }
@@ -894,7 +916,7 @@ func (eIPC *egressIPClusterController) deleteAllocatorEgressIPAssignmentIfExists
 }
 
 // addAllocatorEgressIPAssignments adds the allocation to the cache, so that
-// they are tracked during the life-cycle of ovnkube-master
+// they are tracked during the life-cycle of the cluster-manager controller.
 func (eIPC *egressIPClusterController) addAllocatorEgressIPAssignments(name string, statusAssignments []egressipv1.EgressIPStatusItem) {
 	eIPC.nodeAllocator.Lock()
 	defer eIPC.nodeAllocator.Unlock()
@@ -956,8 +978,8 @@ func (eIPC *egressIPClusterController) reconcileEgressIP(old, new *egressipv1.Eg
 	}
 
 	// Validate the status, on restart it could be the case that what might have
-	// been assigned when ovnkube-master last ran is not a valid assignment
-	// anymore (specifically if ovnkube-master has been crashing for a while).
+	// been assigned when ovnkube-cluster-manager last ran is not a valid assignment
+	// anymore (specifically if ovnkube-cluster-manager has been crashing for a while).
 	// Any invalid status at this point in time needs to be removed and assigned
 	// to a valid node.
 	validStatus, invalidStatus := eIPC.validateEgressIPStatus(name, status)
@@ -990,11 +1012,6 @@ func (eIPC *egressIPClusterController) reconcileEgressIP(old, new *egressipv1.Eg
 		statusToRemove = append(statusToRemove, status)
 		ipsToRemove.Insert(status.EgressIP)
 	}
-	// Adding the mark to annotations is bundled with status update in-order to minimise updates, cover the case where there is no update to status
-	// and mark annotation has been modified / removed. This should only occur for an update and the mark was previous set.
-	if ipsToAssign.Len() == 0 && ipsToRemove.Len() == 0 {
-		eIPC.ensureMark(old, new)
-	}
 
 	if ipsToRemove.Len() > 0 {
 		// The following is added as to ensure that we only add after having
@@ -1004,7 +1021,7 @@ func (eIPC *egressIPClusterController) reconcileEgressIP(old, new *egressipv1.Eg
 		// on a cloud: we patch all validStatsuses below, we wait for the status
 		// on the CloudPrivateIPConfig(s) we create to be set before executing
 		// anything in the OVN DB (Note that the status will be set by this
-		// controller in cluster-manager and asynchronously the ovnkube-master
+		// controller in cluster-manager and asynchronously the ovnkube-controller
 		// will read the CRD change and do the necessary plumbing (ADD/UPDATE/DELETE)
 		// in the OVN DB).
 		// So, we need to make sure that we delete and
@@ -1066,7 +1083,7 @@ func (eIPC *egressIPClusterController) reconcileEgressIP(old, new *egressipv1.Eg
 			// Before updating the cloud private IP object, we need to remove the OVN configuration
 			// for these invalid statuses so that traffic is not blackholed to non-existing setup in the
 			// cloud. Thus we patch the egressIP status with the valid set of statuses which will
-			// trigger an event for the ovnkube-master to take action upon.
+			// trigger an event for the ovnkube-controller to take action upon.
 			// Note that once we figure out the statusToAdd parts below we will trigger an
 			// update to cloudPrivateIP object which will trigger another patch for the eIP object.
 			//
@@ -1121,12 +1138,12 @@ func (eIPC *egressIPClusterController) reconcileEgressIP(old, new *egressipv1.Eg
 	return nil
 }
 
-// syncCloudPrivateIPConfigs This method takes care syncing stale data in the
-// egress ip status with cloud private ip config upon master reboot cases.
-// cloud private ip config entry would have been deleted when master was down
-// whereas egress ip status was not updated for the deleted entry in an error
-// scenario. Hence this method ensures egress ip status is upto date with
-// available cloud private ip config entry.
+// syncCloudPrivateIPConfigs reconciles stale data in the EgressIP status
+// against the CloudPrivateIPConfig objects upon cluster-manager restart (or
+// leadership change). The CloudPrivateIPConfig entry may have been deleted
+// while the cluster manager was down, without the EgressIP status being
+// updated accordingly. This sync ensures the EgressIP status is consistent
+// with the CloudPrivateIPConfig objects currently present.
 func (eIPC *egressIPClusterController) syncCloudPrivateIPConfigs(objs []interface{}) error {
 	if !util.PlatformTypeIsEgressIPCloudProvider() {
 		return nil
@@ -1228,7 +1245,7 @@ func (eIPC *egressIPClusterController) assignEgressIPs(name string, egressIPs []
 			eIPC.recorder.Eventf(&eIPRef, corev1.EventTypeWarning, "EgressIPConflict", "Egress IP %s with IP "+
 				"%v is conflicting with a host (%s) IP address and will not be assigned", name, eIP, conflictedHost)
 			klog.Errorf("Egress IP: %v address is already assigned on an interface on node %s", eIP, conflictedHost)
-			return assignments
+			continue
 		}
 		if status, exists := existingAllocations[eIP.String()]; exists {
 			// On public clouds we will re-process assignments for the same IP
@@ -1280,7 +1297,7 @@ func (eIPC *egressIPClusterController) assignEgressIPs(name string, egressIPs []
 					"IP: %q for EgressIP: %s is already allocated for EgressIP: %s on %s", egressIP, name, status.Name, status.Node,
 				)
 				klog.Errorf("IP: %q for EgressIP: %s is already allocated for EgressIP: %s on %s", egressIP, name, status.Name, status.Node)
-				return assignments
+				continue
 			}
 		}
 		// Egress IP for secondary host networks is only available on baremetal environments
@@ -1825,10 +1842,21 @@ func generateStatusPatchOp(statusItems []egressipv1.EgressIPStatusItem) jsonPatc
 	}
 }
 
+// ensureAllocatorEgressIPAssignments adds EgressIP assignments to the allocator cache
+// if the EgressIP has status items. This is critical to prevent duplicate IP assignments
+// during restart when EgressIPs are processed in arbitrary order.
+func (eIPC *egressIPClusterController) ensureAllocatorEgressIPAssignments(egressIP *egressipv1.EgressIP) {
+	if len(egressIP.Status.Items) > 0 {
+		eIPC.addAllocatorEgressIPAssignments(egressIP.Name, egressIP.Status.Items)
+	}
+}
+
 // syncEgressIPMarkAllocator iterates over all existing EgressIPs. It builds a mark cache of existing marks stored on each
-// EgressIP annotation or allocates and adds a new mark to an EgressIP if it doesn't exist
+// EgressIP annotation or allocates and adds a new mark to an EgressIP if it doesn't exist.
 func (eIPC *egressIPClusterController) syncEgressIPMarkAllocator(egressIPs []interface{}) error {
-	// reserve previously assigned marks
+	// Reserve previously assigned marks. Note: the allocator cache is pre-populated with
+	// existing assignments from EgressIP statuses in initEgressNodeReachability, which runs
+	// before this sync function.
 	for _, object := range egressIPs {
 		egressIP, ok := object.(*egressipv1.EgressIP)
 		if !ok {
@@ -1878,22 +1906,6 @@ var (
 
 func getEgressIPMarkAllocator() id.Allocator {
 	return id.NewIDAllocator("eip_mark", eipMarkMax-eipMarkMin)
-}
-
-// ensureMark ensures that if a mark was remove or changed value, then restore the mark.
-func (eIPC *egressIPClusterController) ensureMark(old, new *egressipv1.EgressIP) {
-	// Adding the mark to annotations is bundled with status update in-order to minimise updates, cover the case where there is no update to status
-	// and mark annotation has been modified / removed. This should only occur for an update and the mark was previous set.
-	if old != nil && new != nil {
-		if util.IsEgressIPMarkSet(old.Annotations) && util.EgressIPMarkAnnotationChanged(old.Annotations, new.Annotations) {
-			mark, _, err := eIPC.getOrAllocMark(new.Name)
-			if err != nil {
-				klog.Errorf("Failed to restore EgressIP %s mark because unable to retrieve mark: %v", new.Name, err)
-			} else if err = eIPC.patchEgressIP(new.Name, generateMarkPatchOp(mark)); err != nil {
-				klog.Errorf("Failed to restore EgressIP %s mark because patching failed: %v", new.Name, err)
-			}
-		}
-	}
 }
 
 // getOrAllocMark allocates a new mark integer for name using round-robin strategy if none was already allocated for name otherwise

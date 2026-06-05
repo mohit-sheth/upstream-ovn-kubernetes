@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package services
 
 import (
@@ -12,12 +15,12 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics/recorders"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics/recorders"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // LB is a desired or existing load_balancer configuration in OVN.
@@ -394,13 +397,19 @@ func buildLB(lb *LB) *templateLoadBalancer {
 
 // buildVipMap returns a viups map from a set of rules
 func buildVipMap(rules []LBRule) map[string]string {
+	// the same rule source could have multiple rules each owns different target port number,
+	// consolidate all the targets of different target port number.
+	vipTgts := make(map[string][]string)
 	vipMap := make(map[string]string, len(rules))
 	for _, r := range rules {
 		tgts := make([]string, 0, len(r.Targets))
 		for _, tgt := range r.Targets {
 			tgts = append(tgts, tgt.String())
 		}
-		vipMap[r.Source.String()] = strings.Join(tgts, ",")
+		vipTgts[r.Source.String()] = append(vipTgts[r.Source.String()], tgts...)
+	}
+	for source, tgts := range vipTgts {
+		vipMap[source] = strings.Join(tgts, ",")
 	}
 
 	return vipMap

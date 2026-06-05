@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -10,16 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	utilnet "k8s.io/utils/net"
 
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/generator/udn"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 func (oc *DefaultNetworkController) getRoutingExternalGWs(nsInfo *namespaceInfo) *gatewayInfo {
@@ -63,7 +64,7 @@ func (oc *DefaultNetworkController) getRoutingPodGWs(nsInfo *namespaceInfo) map[
 
 // addLocalPodToNamespace returns pod's routing gateway info and the ops needed
 // to add pod's IP to the namespace's address set and port group.
-func (oc *DefaultNetworkController) addLocalPodToNamespace(ns string, ips []*net.IPNet, portUUID string) (*gatewayInfo, map[string]gatewayInfo, []ovsdb.Operation, error) {
+func (oc *DefaultNetworkController) addLocalPodToNamespace(ns string, portUUID string) (*gatewayInfo, map[string]gatewayInfo, []ovsdb.Operation, error) {
 	var err error
 	nsInfo, nsUnlock, err := oc.ensureNamespaceLocked(ns, true, nil)
 	if err != nil {
@@ -72,21 +73,11 @@ func (oc *DefaultNetworkController) addLocalPodToNamespace(ns string, ips []*net
 
 	defer nsUnlock()
 
-	ops, err := oc.addLocalPodToNamespaceLocked(nsInfo, ips, portUUID)
+	ops, err := oc.addLocalPodToNamespaceLocked(nsInfo, portUUID)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	return oc.getRoutingExternalGWs(nsInfo), oc.getRoutingPodGWs(nsInfo), ops, nil
-}
-
-func (oc *DefaultNetworkController) addRemotePodToNamespace(ns string, ips []*net.IPNet) error {
-	nsInfo, nsUnlock, err := oc.ensureNamespaceLocked(ns, true, nil)
-	if err != nil {
-		return fmt.Errorf("failed to ensure namespace locked: %v", err)
-	}
-
-	defer nsUnlock()
-	return nsInfo.addressSet.AddAddresses(util.IPNetsIPToStringSlice(ips))
 }
 
 func isNamespaceMulticastEnabled(annotations map[string]string) bool {
@@ -170,7 +161,7 @@ func (oc *DefaultNetworkController) updateNamespace(old, newer *corev1.Namespace
 					if util.PodWantsHostNetwork(pod) {
 						continue
 					}
-					podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo())
+					podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo(), nil)
 					if err != nil {
 						errors = append(errors, fmt.Errorf("unable to get pod %q IPs for SNAT rule removal err (%v)", logicalPort, err))
 					}
@@ -204,12 +195,11 @@ func (oc *DefaultNetworkController) updateNamespace(old, newer *corev1.Namespace
 				}
 			}
 		}
-		if config.OVNKubernetesFeature.EnableInterconnect && oc.zone != types.OvnDefaultZone {
-			// If interconnect is disabled OR interconnect is running in single-zone-mode,
-			// the ovnkube-master is responsible for patching ICNI managed namespaces with
-			// "k8s.ovn.org/external-gw-pod-ips". In that case, we need ovnkube-node to flush
-			// conntrack on every node. In multi-zone-interconnect case, we will handle the flushing
-			// directly on the ovnkube-controller code to avoid an extra namespace annotation
+		if oc.zone != types.OvnDefaultZone {
+			// In multi-zone interconnect, ovnkube-controller flushes conntrack
+			// directly here rather than using the "k8s.ovn.org/external-gw-pod-ips"
+			// namespace annotation that ovnkube-node watches in single-zone
+			// deployments.
 			gatewayIPs, err := oc.apbExternalRouteController.GetAdminPolicyBasedExternalRouteIPsForTargetNamespace(old.Name)
 			if err != nil {
 				return fmt.Errorf("unable to retrieve gateway IPs for Admin Policy Based External Route objects for namespace %s: %w", old.Name, err)
@@ -241,26 +231,9 @@ func (oc *DefaultNetworkController) updateNamespace(old, newer *corev1.Namespace
 				} else {
 					// Helper function to handle the complex SNAT operations
 					handleSNATOps := func() error {
-						extIPs, err := getExternalIPsGR(oc.watchFactory, pod.Spec.NodeName)
+						ops, err := oc.AddPodSNATOps(pod.Spec.NodeName, podAnnotation.IPs)
 						if err != nil {
 							return err
-						}
-
-						var ops []ovsdb.Operation
-						// Handle each pod IP individually since each IP family needs its own SNAT match
-						for _, podIP := range podAnnotation.IPs {
-							ipFamily := utilnet.IPv4
-							if utilnet.IsIPv6CIDR(podIP) {
-								ipFamily = utilnet.IPv6
-							}
-							snatMatch, err := GetNetworkScopedClusterSubnetSNATMatch(oc.nbClient, oc.GetNetInfo(), pod.Spec.NodeName, oc.isPodNetworkAdvertisedAtNode(pod.Spec.NodeName), ipFamily)
-							if err != nil {
-								return fmt.Errorf("failed to get SNAT match for node %s for network %s: %v", pod.Spec.NodeName, oc.GetNetworkName(), err)
-							}
-							ops, err = addOrUpdatePodSNATOps(oc.nbClient, oc.GetNetworkScopedGWRouterName(pod.Spec.NodeName), extIPs, []*net.IPNet{podIP}, snatMatch, ops)
-							if err != nil {
-								return err
-							}
 						}
 
 						// Execute all operations in a single transaction
@@ -338,71 +311,5 @@ func (oc *DefaultNetworkController) deleteNamespace(ns *corev1.Namespace) error 
 // with its mutex locked.
 // ns is the name of the namespace, while namespace is the optional k8s namespace object
 func (oc *DefaultNetworkController) ensureNamespaceLocked(ns string, readOnly bool, namespace *corev1.Namespace) (*namespaceInfo, func(), error) {
-	ipsGetter := func(ns string) []net.IP {
-		// special handling of host network namespace. issues/3381
-		if config.Kubernetes.HostNetworkNamespace != "" && ns == config.Kubernetes.HostNetworkNamespace {
-			return oc.getAllHostNamespaceAddresses()
-		}
-		return oc.getAllNamespacePodAddresses(ns)
-	}
-	return oc.ensureNamespaceLockedCommon(ns, readOnly, namespace, ipsGetter, oc.configureNamespace)
-}
-
-// getAllHostNamespaceAddresses retrives management port and gateway router LRP
-// IP for all nodes in the cluster
-func (oc *DefaultNetworkController) getAllHostNamespaceAddresses() []net.IP {
-	var ips []net.IP
-	// add the mp0 interface addresses to this namespace.
-	existingNodes, err := oc.watchFactory.GetNodes()
-	if err != nil {
-		klog.Errorf("Failed to get all nodes (%v)", err)
-	} else {
-		ips = make([]net.IP, 0, len(existingNodes))
-		for _, node := range existingNodes {
-			if config.HybridOverlay.Enabled && util.NoHostSubnet(node) {
-				// skip hybrid overlay nodes
-				continue
-			}
-			hostNetworkIPs, err := oc.getHostNamespaceAddressesForNode(node)
-			if err != nil {
-				klog.Errorf("Error parsing annotation for node %s: %v", node.Name, err)
-			}
-			ips = append(ips, hostNetworkIPs...)
-		}
-	}
-	return ips
-}
-
-// getHostNamespaceAddressesForNode retrives management port and gateway router LRP
-// IP of a specific node
-func (oc *DefaultNetworkController) getHostNamespaceAddressesForNode(node *corev1.Node) ([]net.IP, error) {
-	var ips []net.IP
-	hostSubnets, err := util.ParseNodeHostSubnetAnnotation(node, types.DefaultNetworkName)
-	if err != nil {
-		return nil, err
-	}
-	for _, hostSubnet := range hostSubnets {
-		mgmtIfAddr := oc.GetNodeManagementIP(hostSubnet)
-		ips = append(ips, mgmtIfAddr.IP)
-	}
-	// for shared gateway mode we will use LRP IPs to SNAT host network traffic
-	// so add these to the address set.
-	lrpIPs, gwIPsErr := udn.GetGWRouterIPs(node, oc.GetNetInfo())
-	if gwIPsErr != nil {
-		if !util.IsAnnotationNotSetError(gwIPsErr) {
-			return nil, gwIPsErr
-		}
-		// FIXME(tssurya): This is present for backwards compatibility
-		// Remove me a few months from now
-		var lrpAddrsErr error
-		lrpIPs, lrpAddrsErr = util.ParseNodeGatewayRouterLRPAddrs(node)
-		if lrpAddrsErr != nil {
-			return nil, fmt.Errorf("failed to fallback to annotations after error %q: %w", gwIPsErr, lrpAddrsErr)
-		}
-	}
-
-	for _, lrpIP := range lrpIPs {
-		ips = append(ips, lrpIP.IP)
-	}
-	return ips, nil
+	return oc.ensureNamespaceLockedCommon(ns, readOnly, namespace, oc.configureNamespace)
 }

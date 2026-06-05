@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -8,14 +11,13 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/iprulemanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/managementport"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/vrfmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/iprulemanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/managementport"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/vrfmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // UserDefinedNodeNetworkController structure is the object which holds the controls for starting
@@ -74,7 +76,7 @@ func (nc *UserDefinedNodeNetworkController) Start(_ context.Context) error {
 	klog.Infof("Starting UDN node network controller for network %s", nc.GetNetworkName())
 
 	// enable adding ovs ports for dpu pods in both primary and secondary user-defined networks
-	if (config.OVNKubernetesFeature.EnableMultiNetwork || util.IsNetworkSegmentationSupportEnabled()) && config.OvnKubeNode.Mode == types.NodeModeDPU {
+	if (config.OVNKubernetesFeature.EnableMultiNetwork || util.IsNetworkSegmentationSupportEnabled()) && config.IsModeDPU() {
 		handler, err := nc.watchPodsDPU()
 		if err != nil {
 			return err
@@ -127,10 +129,18 @@ func (nc *UserDefinedNodeNetworkController) Cleanup() error {
 	return nil
 }
 
+// HandleNetworkRefChange satisfies the NetworkController interface. UDN node controllers only
+// manage local node state, so NAD reference changes for remote nodes are ignored.
+func (nc *UserDefinedNodeNetworkController) HandleNetworkRefChange(_ string, _ bool) {}
+
 func (nc *UserDefinedNodeNetworkController) shouldReconcileNetworkChange(old, new util.NetInfo) bool {
-	wasUDNNetworkAdvertisedAtNode := util.IsPodNetworkAdvertisedAtNode(old, nc.name)
-	isUDNNetworkAdvertisedAtNode := util.IsPodNetworkAdvertisedAtNode(new, nc.name)
-	return wasUDNNetworkAdvertisedAtNode != isUDNNetworkAdvertisedAtNode
+	switch {
+	case util.IsPodNetworkAdvertisedAtNode(old, nc.name) != util.IsPodNetworkAdvertisedAtNode(new, nc.name):
+		return true
+	case util.IsPodNetworkAdvertisedAtNodeDefaultVRF(old, nc.name) != util.IsPodNetworkAdvertisedAtNodeDefaultVRF(new, nc.name):
+		return true
+	}
+	return false
 }
 
 // Reconcile function reconciles three entities based on whether UDN network is advertised

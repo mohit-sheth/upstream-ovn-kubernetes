@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -26,17 +29,18 @@ import (
 
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
-	egressqosapply "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/applyconfiguration/egressqos/v1"
-	egressqosinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	egressqosapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1"
+	egressqosapply "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/applyconfiguration/egressqos/v1"
+	egressqosinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/informers/externalversions/egressqos/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const (
@@ -76,7 +80,7 @@ func getEgressQosAddrSetDbIDs(namespace, priority, controller string) *libovsdbo
 }
 
 func getEgressQoSRuleDbIDs(namespace string, rulePriority int) *libovsdbops.DbObjectIDs {
-	return libovsdbops.NewDbObjectIDs(libovsdbops.QoSEgressQoS, DefaultNetworkControllerName, map[libovsdbops.ExternalIDKey]string{
+	return libovsdbops.NewDbObjectIDs(libovsdbops.QoSEgressQoS, types.DefaultNetworkControllerName, map[libovsdbops.ExternalIDKey]string{
 		libovsdbops.ObjectNameKey: namespace,
 		libovsdbops.PriorityKey:   fmt.Sprintf("%d", rulePriority),
 	})
@@ -140,28 +144,19 @@ func (oc *DefaultNetworkController) cloneEgressQoSRule(raw egressqosapi.EgressQo
 
 func (oc *DefaultNetworkController) createASForEgressQoSRule(podSelector metav1.LabelSelector, namespace string, priority int) (addressset.AddressSet, *sync.Map, error) {
 	var addrSet addressset.AddressSet
+	var err error
 
-	selector, err := metav1.LabelSelectorAsSelector(&podSelector)
-	if err != nil {
+	if _, err := metav1.LabelSelectorAsSelector(&podSelector); err != nil {
 		return nil, nil, err
-	}
-	if selector.Empty() { // empty selector means that the rule applies to all pods in the namespace
-		asIndex := getNamespaceAddrSetDbIDs(namespace, oc.controllerName)
-		addrSet, err := oc.addressSetFactory.EnsureAddressSet(asIndex)
-		if err != nil {
-			return nil, nil, fmt.Errorf("cannot ensure that addressSet for namespace %s exists %v", namespace, err)
-		}
-		return addrSet, &sync.Map{}, nil
 	}
 
 	podsCache := sync.Map{}
-
-	pods, err := oc.watchFactory.GetPodsBySelector(namespace, podSelector)
+	asIndex := getEgressQosAddrSetDbIDs(namespace, fmt.Sprintf("%d", priority), oc.controllerName)
+	addrSet, err = oc.addressSetFactory.EnsureAddressSet(asIndex)
 	if err != nil {
 		return nil, nil, err
 	}
-	asIndex := getEgressQosAddrSetDbIDs(namespace, fmt.Sprintf("%d", priority), oc.controllerName)
-	addrSet, err = oc.addressSetFactory.EnsureAddressSet(asIndex)
+	pods, err := oc.watchFactory.GetPodsBySelector(namespace, podSelector)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -169,7 +164,7 @@ func (oc *DefaultNetworkController) createASForEgressQoSRule(podSelector metav1.
 	for _, pod := range pods {
 		// we don't handle HostNetworked or completed pods or not-scheduled pods or remote-zone pods
 		if !util.PodWantsHostNetwork(pod) && !util.PodCompleted(pod) && util.PodScheduled(pod) && oc.isPodScheduledinLocalZone(pod) {
-			podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo())
+			podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo(), nil)
 			if err != nil && !errors.Is(err, util.ErrNoPodIPFound) {
 				return nil, nil, err
 			}
@@ -194,7 +189,7 @@ func (oc *DefaultNetworkController) initEgressQoSController(
 	oc.egressQoSLister = eqInformer.Lister()
 	oc.egressQoSSynced = eqInformer.Informer().HasSynced
 	oc.egressQoSQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controller.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "egressqos"},
 	)
 	_, err := eqInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -210,7 +205,7 @@ func (oc *DefaultNetworkController) initEgressQoSController(
 	oc.egressQoSPodLister = podInformer.Lister()
 	oc.egressQoSPodSynced = podInformer.Informer().HasSynced
 	oc.egressQoSPodQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controller.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "egressqospods"},
 	)
 	_, err = podInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -225,7 +220,7 @@ func (oc *DefaultNetworkController) initEgressQoSController(
 	oc.egressQoSNodeLister = nodeInformer.Lister()
 	oc.egressQoSNodeSynced = nodeInformer.Informer().HasSynced
 	oc.egressQoSNodeQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controller.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "egressqosnodes"},
 	)
 	_, err = nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -392,7 +387,7 @@ func (oc *DefaultNetworkController) processNextEgressQoSWorkItem(wg *sync.WaitGr
 }
 
 // This takes care of syncing stale data which we might have in OVN if
-// there's no ovnkube-master running for a while.
+// there's no ovnkube-controller running for a while.
 // It deletes all QoSes and Address Sets from OVN that belong to deleted EgressQoSes.
 func (oc *DefaultNetworkController) repairEgressQoSes() error {
 	startTime := time.Now()
@@ -755,7 +750,7 @@ func (oc *DefaultNetworkController) syncEgressQoSPod(key string) error {
 		return nil
 	}
 
-	podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo())
+	podIPs, err := util.GetPodIPsOfNetwork(pod, oc.GetNetInfo(), nil)
 	if errors.Is(err, util.ErrNoPodIPFound) {
 		return nil // reprocess it when it is updated with an IP
 	}
@@ -770,19 +765,16 @@ func (oc *DefaultNetworkController) syncEgressQoSPod(key string) error {
 		if err != nil {
 			return err
 		}
-		if selector.Empty() { // rule applies to all pods in the namespace, no need to modify address set
-			continue
-		}
-
 		_, loaded := r.pods.Load(pod.Name)
-		if selector.Matches(podLabels) && !loaded {
+		selected := selector.Empty() || selector.Matches(podLabels)
+		if selected && !loaded {
 			ops, err := r.addrSet.AddAddressesReturnOps(util.StringSlice(podIPs))
 			if err != nil {
 				return err
 			}
 			allOps = append(allOps, ops...)
 			podMapOps = append(podMapOps, mapAndOp{r.pods, mapInsert})
-		} else if !selector.Matches(podLabels) && loaded {
+		} else if !selected && loaded {
 			ops, err := r.addrSet.DeleteAddressesReturnOps(util.StringSlice(podIPs))
 			if err != nil {
 				return err
@@ -826,9 +818,9 @@ func (oc *DefaultNetworkController) onEgressQoSPodAdd(obj interface{}) {
 		// That either means node changed zones - which will involve a full delete and recreate
 		// the OVN objects in a new zone's DB and/or node is gone etc. All those scenarios don't
 		// need this controller to take any action.
-		// NOTE2: During upgrades when the legacy ovnkube-master is still running it will detect
-		// nodes have gone remote which for this feature means deleting the switches totally and
-		// based on OVN db schema this will remove all referenced QoS rules created on the switch
+		// NOTE2: The controller that owns a node's previous zone is responsible for
+		// deleting that zone's switch, which removes all referenced QoS rules created
+		// on the switch based on the OVN DB schema.
 		return // not local to this zone, nothing to do; no-op
 	}
 	oc.egressQoSPodQueue.Add(key)
@@ -846,8 +838,8 @@ func (oc *DefaultNetworkController) onEgressQoSPodUpdate(oldObj, newObj interfac
 
 	oldPodLabels := labels.Set(oldPod.Labels)
 	newPodLabels := labels.Set(newPod.Labels)
-	oldPodIPs, _ := util.GetPodIPsOfNetwork(oldPod, oc.GetNetInfo())
-	newPodIPs, _ := util.GetPodIPsOfNetwork(newPod, oc.GetNetInfo())
+	oldPodIPs, _ := util.GetPodIPsOfNetwork(oldPod, oc.GetNetInfo(), nil)
+	newPodIPs, _ := util.GetPodIPsOfNetwork(newPod, oc.GetNetInfo(), nil)
 	isOldPodLocal := oc.isPodScheduledinLocalZone(oldPod)
 	isNewPodLocal := oc.isPodScheduledinLocalZone(newPod)
 	oldPodCompleted := util.PodCompleted(oldPod)
@@ -885,9 +877,9 @@ func (oc *DefaultNetworkController) onEgressQoSPodDelete(obj interface{}) {
 		// That either means node changed zones - which will involve a full delete and recreate
 		// the OVN objects in a new zone's DB and/or node is gone etc. All those scenarios don't
 		// need this controller to take any action.
-		// NOTE2: During upgrades when the legacy ovnkube-master is still running it will detect
-		// nodes have gone remote which for this feature means deleting the switches totally and
-		// based on OVN db schema this will remove all referenced QoS rules created on the switch
+		// NOTE2: The controller that owns a node's previous zone is responsible for
+		// deleting that zone's switch, which removes all referenced QoS rules created
+		// on the switch based on the OVN DB schema.
 		return // not local to this zone, nothing to do; no-op
 	}
 	oc.egressQoSPodQueue.Add(key)

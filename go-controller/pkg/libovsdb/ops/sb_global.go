@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ops
 
 import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
 )
 
 // GetNBGlobal looks up the SB Global entry from the cache

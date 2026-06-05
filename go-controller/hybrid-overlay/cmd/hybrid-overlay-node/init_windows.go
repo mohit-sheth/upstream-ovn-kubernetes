@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build windows
 // +build windows
 
@@ -23,7 +26,7 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/windows/service"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/windows/service"
 )
 
 // initForOS performs Windows specific app initialization

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovnwebhook
 
 import (
@@ -10,22 +13,21 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	listers "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kubevirt"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kubevirt"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // checkPodAnnot defines additional checks for the allowed annotations
 type checkPodAnnot func(nodeLister listers.NodeLister, v annotationChange, pod *corev1.Pod, nodeName string) error
 
-// interconnectPodAnnotationChecks holds annotations allowed for ovnkube-node:<nodeName> users in IC environments
+// interconnectPodAnnotations holds annotations allowed for ovnkube-node:<nodeName> users.
 var interconnectPodAnnotations = map[string]checkPodAnnot{
-	util.OvnPodAnnotationName: func(nodeLister listers.NodeLister, v annotationChange, pod *corev1.Pod, nodeName string) error {
+	types.OvnPodAnnotationName: func(nodeLister listers.NodeLister, v annotationChange, pod *corev1.Pod, nodeName string) error {
 		// Ignore kubevirt pods with live migration, the IP can cross node-subnet boundaries
 		if kubevirt.IsPodLiveMigratable(pod) {
 			return nil
@@ -35,8 +37,11 @@ var interconnectPodAnnotations = map[string]checkPodAnnot{
 			return fmt.Errorf("the annotation is not allowed on host networked pods")
 		}
 
-		podAnnot, err := util.UnmarshalPodAnnotation(map[string]string{util.OvnPodAnnotationName: v.value}, types.DefaultNetworkName)
+		podAnnot, err := util.UnmarshalPodAnnotation(map[string]string{types.OvnPodAnnotationName: v.value}, types.DefaultNetworkName)
 		if err != nil {
+			if util.IsAnnotationNotSetError(err) {
+				return nil
+			}
 			return err
 		}
 		node, err := nodeLister.Get(nodeName)
@@ -110,21 +115,19 @@ func NewPodAdmissionWebhook(nodeLister listers.NodeLister, podAdmissions []PodAd
 	}
 }
 
-func (p PodAdmission) ValidateCreate(_ context.Context, _ runtime.Object) (warnings admission.Warnings, err error) {
+func (p PodAdmission) ValidateCreate(_ context.Context, _ *corev1.Pod) (warnings admission.Warnings, err error) {
 	// Ignore creation, the webhook is configured to only handle pod/status updates
 	return nil, nil
 }
 
-func (p PodAdmission) ValidateDelete(_ context.Context, _ runtime.Object) (warnings admission.Warnings, err error) {
+func (p PodAdmission) ValidateDelete(_ context.Context, _ *corev1.Pod) (warnings admission.Warnings, err error) {
 	// Ignore creation, the webhook is configured to only handle pod/status updates
 	return nil, nil
 }
 
-var _ admission.CustomValidator = &PodAdmission{}
+var _ admission.Validator[*corev1.Pod] = &PodAdmission{}
 
-func (p PodAdmission) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (warnings admission.Warnings, err error) {
-	oldPod := oldObj.(*corev1.Pod)
-	newPod := newObj.(*corev1.Pod)
+func (p PodAdmission) ValidateUpdate(ctx context.Context, oldPod, newPod *corev1.Pod) (warnings admission.Warnings, err error) {
 
 	req, err := admission.RequestFromContext(ctx)
 	if err != nil {

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -11,22 +14,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/deploymentconfig"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
-	infraapi "github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
+	e2eendpointslice "k8s.io/kubernetes/test/e2e/framework/endpointslice"
 
-	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	"github.com/onsi/ginkgo/extensions/table"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
@@ -69,7 +71,11 @@ func egressFirewallPolicyValidationTests(useUDN bool, udnTopology string) {
 				if err != nil {
 					framework.Failf("could not get egressfirewall %q in namespace %s: %v", "default", namespace, err)
 				}
-				return status == "EgressFirewall Rules applied"
+				if status == "EgressFirewall Rules applied" {
+					return true
+				}
+				framework.Logf("egressfirewall %q in namespace %s is not applied. Status: %s", "default", namespace, status)
+				return false
 			}, 10*time.Second).Should(gomega.BeTrue(),
 				fmt.Sprintf("expected egress firewall in namespace %s to be successfully applied", namespace))
 		}
@@ -139,9 +145,6 @@ func egressFirewallPolicyValidationTests(useUDN bool, udnTopology string) {
 					e2eskipper.Skipf("Skipping UDN tests: ENABLE_NETWORK_SEGMENTATION not set")
 				}
 
-				nadClient, err := nadclient.NewForConfig(f.ClientConfig())
-				framework.ExpectNoError(err)
-
 				namespace, err := f.CreateNamespace(context.TODO(), f.BaseName, map[string]string{
 					"e2e-framework":           f.BaseName,
 					RequiredUDNNamespaceLabel: "",
@@ -149,24 +152,35 @@ func egressFirewallPolicyValidationTests(useUDN bool, udnTopology string) {
 				f.Namespace = namespace
 				framework.ExpectNoError(err)
 
-				userDefinedNetworkIPv4Subnet := "172.31.0.0/16"
-				userDefinedNetworkIPv6Subnet := "2014:100:200::0/60"
+				userDefinedNetworkIPv4Subnets := []string{"172.31.0.0/16"}
+				userDefinedNetworkIPv6Subnets := []string{"2014:100:200::0/60"}
+				if udnTopology == "layer3" {
+					userDefinedNetworkIPv4Subnets = []string{"172.31.0.0/23/24", "172.30.0.0/16/24"}
+					userDefinedNetworkIPv6Subnets = []string{"2014:100:200::0/63/64", "2014:100:100::0/48/64"}
+				}
+				userDefinedNetworkSubnets := append(append([]string{}, userDefinedNetworkIPv4Subnets...), userDefinedNetworkIPv6Subnets...)
 
 				nadCfg := networkAttachmentConfigParams{
 					name:     "tenant-red",
 					topology: udnTopology,
-					cidr:     joinStrings(userDefinedNetworkIPv4Subnet, userDefinedNetworkIPv6Subnet),
+					cidr:     joinStrings(userDefinedNetworkSubnets...),
 					role:     "primary",
 				}
 
 				netConfig = newNetworkAttachmentConfig(nadCfg)
 				netConfig.namespace = f.Namespace.Name
-				_, err = nadClient.NetworkAttachmentDefinitions(f.Namespace.Name).Create(
-					context.Background(),
-					generateNAD(netConfig, f.ClientSet),
-					metav1.CreateOptions{},
-				)
-				framework.ExpectNoError(err)
+				switch strings.ToLower(udnTopology) {
+				case "layer2":
+					createLayer2PrimaryUDNWithSubnets(f.ClientSet, f.Namespace.Name, netConfig.name,
+						userDefinedNetworkIPv4Subnets, userDefinedNetworkIPv6Subnets)
+				case "layer3":
+					createPrimaryUDNWithSubnets(f.ClientSet, f.Namespace.Name, netConfig.name, "Layer3",
+						userDefinedNetworkIPv4Subnets, userDefinedNetworkIPv6Subnets)
+				default:
+					framework.Failf("unsupported UDN topology %q", udnTopology)
+				}
+				gomega.Eventually(userDefinedNetworkReadyFunc(f.DynamicClient, f.Namespace.Name, netConfig.name),
+					30*time.Second, time.Second).Should(gomega.Succeed())
 			}
 		})
 
@@ -211,13 +225,14 @@ func egressFirewallPolicyValidationTests(useUDN bool, udnTopology string) {
 			}
 
 			checkExternalContainerConnectivity := func(externalContainer infraapi.ExternalContainer, dstIP string, dstPort int) {
-				_, err := infraprovider.Get().ExecExternalContainerCommand(externalContainer, []string{
-					"curl", "-s", "--connect-timeout", fmt.Sprint(testTimeout), net.JoinHostPort(dstIP, fmt.Sprint(dstPort)),
-				})
-				if err != nil {
-					framework.Failf("Failed to connect from external container %s to %s:%d: %v",
-						externalContainer.GetName(), dstIP, dstPort, err)
-				}
+				gomega.Eventually(func() error {
+					_, err := infraprovider.Get().ExecExternalContainerCommand(externalContainer, []string{
+						"curl", "-s", "--connect-timeout", fmt.Sprint(time.Second), net.JoinHostPort(dstIP, fmt.Sprint(dstPort)),
+					})
+					return err
+				}, time.Duration(2*testTimeout)*time.Second).Should(gomega.Succeed(),
+					fmt.Sprintf("Failed to connect from external container %s to %s:%d",
+						externalContainer.GetName(), dstIP, dstPort))
 			}
 
 			// createSrcPodWithRetry creates a pod that can reach the specified destination with a given number of retries.
@@ -334,6 +349,7 @@ spec:
 
 			ginkgo.It("Should validate the egress firewall policy functionality for allowed CIDR and port", func() {
 				srcPodName := "e2e-egress-fw-src-pod"
+				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
 				// egress firewall crd yaml configuration
 				var egressFirewallConfig = fmt.Sprintf(`kind: EgressFirewall
 apiVersion: k8s.ovn.org/v1
@@ -353,9 +369,6 @@ spec:
       cidrSelector: %s
 `, f.Namespace.Name, getExternalContainerIP(externalContainer1), subnetMask, externalContainer1.GetPortStr(), denyAllCIDR)
 				applyEF(egressFirewallConfig, f.Namespace.Name)
-
-				// create the pod that will be used as the source for the connectivity test
-				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
 
 				// Verify the remote host/port as explicitly allowed by the firewall policy is reachable
 				ginkgo.By(fmt.Sprintf("Verifying connectivity to an explicitly allowed port on host %s is permitted as "+
@@ -393,7 +406,7 @@ spec:
 				framework.ExpectNoError(err, fmt.Sprintf("unable to create nodePort service, err: %v", err))
 
 				ginkgo.By("Waiting for the endpoints to pop up")
-				err = framework.WaitForServiceEndpointsNum(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 1, time.Second, wait.ForeverTestTimeout)
+				err = e2eendpointslice.WaitForEndpointCount(context.TODO(), f.ClientSet, f.Namespace.Name, serviceName, 1)
 				framework.ExpectNoError(err, "failed to validate endpoints for service %s in namespace: %s", serviceName, f.Namespace.Name)
 
 				// 2. Check connectivity works both ways
@@ -441,6 +454,7 @@ spec:
 				srcPodName := "e2e-egress-fw-src-pod"
 				dstPodName := "e2e-egress-fw-dst-pod"
 				dstPort := "1234"
+				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
 				// egress firewall crd yaml configuration
 				var egressFirewallConfig = fmt.Sprintf(`kind: EgressFirewall
 apiVersion: k8s.ovn.org/v1
@@ -454,9 +468,6 @@ spec:
       cidrSelector: %s
 `, f.Namespace.Name, denyAllCIDR)
 				applyEF(egressFirewallConfig, f.Namespace.Name)
-
-				// create the pod that will be used as the source for the connectivity test
-				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
 
 				// create dst pod
 				dstPod, err := createPod(f, dstPodName, serverNodeInfo.name, f.Namespace.Name,
@@ -485,6 +496,9 @@ spec:
 			})
 
 			ginkgo.It("Should validate that egressfirewall supports DNS name in caps", func() {
+				srcPodName := "e2e-egress-fw-src-pod"
+				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
+
 				// egress firewall crd yaml configuration
 				var egressFirewallConfig = fmt.Sprintf(`kind: EgressFirewall
 apiVersion: k8s.ovn.org/v1
@@ -592,10 +606,8 @@ spec:
 `, f.Namespace.Name, f.Namespace.Name, labelMatch, denyAllCIDR)
 				framework.Logf("Egress Firewall CR generated: %s", egressFirewallConfig)
 
-				applyEF(egressFirewallConfig, f.Namespace.Name)
-
-				// create the pod that will be used as the source for the connectivity test
 				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
+				applyEF(egressFirewallConfig, f.Namespace.Name)
 				// create host networked pod
 				nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), f.ClientSet, 3)
 				framework.ExpectNoError(err)
@@ -795,6 +807,7 @@ spec:
 			ginkgo.It("Should validate that egressfirewall policy functionality for allowed DNS name", func() {
 				dnsName := "www.google.com"
 				srcPodName := "e2e-egress-fw-src-pod"
+				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
 
 				// egress firewall crd yaml configuration
 				var egressFirewallConfig = fmt.Sprintf(`kind: EgressFirewall
@@ -812,9 +825,6 @@ spec:
       cidrSelector: %s
 `, f.Namespace.Name, dnsName, denyAllCIDR)
 				applyEF(egressFirewallConfig, f.Namespace.Name)
-
-				// create the pod that will be used as the source for the connectivity test
-				createSrcPod(srcPodName, serverNodeInfo.name, retryInterval, retryTimeout, f)
 
 				ginkgo.By(fmt.Sprintf("Verifying connectivity to DNS name %s is permitted", dnsName))
 				url := fmt.Sprintf("https://%s", dnsName)

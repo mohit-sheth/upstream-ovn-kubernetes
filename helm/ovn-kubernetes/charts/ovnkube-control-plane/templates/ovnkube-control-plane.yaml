@@ -1,7 +1,7 @@
 # ovnkube-control-plane
 # daemonset version 3
 # starts ovnkube-cluster-manager
-# it is run on the master(s).  Should be used only if interconnect is enabled.
+# it is run on the control-plane node(s).
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -66,6 +66,9 @@ spec:
         - mountPath: /ovn-cert
           name: host-ovn-cert
           readOnly: true
+        - mountPath: /run/ovnkube-config
+          name: ovnkube-config
+          readOnly: true
         resources:
           requests:
             cpu: 100m
@@ -76,7 +79,7 @@ spec:
           value: "crash"
         {{ end -}}
         - name: OVN_DAEMONSET_VERSION
-          value: "1.2.0"
+          value: "1.3.0"
         - name: OVNKUBE_LOGLEVEL
           value: {{ default 4 .Values.logLevel | quote }}
         - name: OVNKUBE_LOGFILE_MAXSIZE
@@ -110,6 +113,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.hostIP
+        {{- if .Values.global.metricsIp }}
+        - name: METRICS_IP
+          value: {{ .Values.global.metricsIp | quote }}
+        {{- end }}
         - name: OVN_KUBERNETES_NAMESPACE
           valueFrom:
             fieldRef:
@@ -130,12 +137,22 @@ spec:
           value: {{ hasKey .Values.global "enableMultiNetwork" | ternary .Values.global.enableMultiNetwork false | quote }}
         - name: OVN_NETWORK_SEGMENTATION_ENABLE
           value: {{ default "" .Values.global.enableNetworkSegmentation | quote }}
+        - name: OVN_ROUTE_ADVERTISEMENTS_ENABLE
+          value: {{ hasKey .Values.global "enableRouteAdvertisements" | ternary .Values.global.enableRouteAdvertisements false | quote }}
+        - name: OVN_EVPN_ENABLE
+          value: {{ hasKey .Values.global "enableEVPN" | ternary .Values.global.enableEVPN false | quote }}
         - name: OVN_NETWORK_CONNECT_ENABLE
           value: {{ default "" .Values.global.enableNetworkConnect | quote }}
         - name: OVN_PRE_CONF_UDN_ADDR_ENABLE
           value: {{ default "" .Values.global.enablePreconfiguredUDNAddresses | quote }}
+        - name: OVN_DYNAMIC_UDN_ALLOCATION
+          value: {{ hasKey .Values.global "enableDynamicUDNAllocation" | ternary .Values.global.enableDynamicUDNAllocation false | quote }}
+        - name: OVN_DYNAMIC_UDN_GRACE_PERIOD
+          value: {{ default "" .Values.global.dynamicUDNGracePeriod | quote }}
         - name: OVN_ADVERTISED_UDN_ISOLATION_MODE
           value: {{ default "strict" .Values.global.advertisedUDNIsolationMode | quote }}
+        - name: OVN_NO_OVERLAY_ENABLE
+          value: {{ default "false" .Values.global.enableNoOverlay | quote }}
         - name: OVN_HYBRID_OVERLAY_NET_CIDR
           value: {{ default "" .Values.global.hybridOverlayNetCidr | quote }}
         - name: OVN_DISABLE_SNAT_MULTIPLE_GWS
@@ -147,7 +164,7 @@ spec:
         - name: OVN_V6_JOIN_SUBNET
           value: {{ default "" .Values.global.v6JoinSubnet | quote }}
         - name: OVN_SSL_ENABLE
-          value: {{ hasKey .Values.global "enableSsl" | ternary .Values.global.enableSsl false | quote }}
+          value: {{ include "isSslEnabled" . | quote }}
         - name: OVN_GATEWAY_MODE
           value: {{ default "shared" .Values.global.gatewayMode }}
         - name: OVN_MULTICAST_ENABLE
@@ -159,8 +176,6 @@ spec:
             configMapKeyRef:
               name: ovn-config
               key: host_network_namespace
-        - name: OVN_ENABLE_INTERCONNECT
-          value: {{ hasKey .Values.global "enableInterconnect" | ternary .Values.global.enableInterconnect false | quote }}
         - name: OVN_ENABLE_MULTI_EXTERNAL_GATEWAY
           value: {{ hasKey .Values.global "enableMultiExternalGateway" | ternary .Values.global.enableMultiExternalGateway false | quote }}
         - name: OVN_NETWORK_QOS_ENABLE
@@ -173,6 +188,8 @@ spec:
           value: {{ hasKey .Values.global "enablePersistentIPs" | ternary .Values.global.enablePersistentIPs false | quote }}
         - name: OVN_ENABLE_DNSNAMERESOLVER
           value: {{ hasKey .Values.global "enableDNSNameResolver" | ternary .Values.global.enableDNSNameResolver false | quote }}
+        - name: OVN_ALLOW_ICMP_NETPOL
+          value: {{ hasKey .Values.global "allowICMPNetworkPolicy" | ternary .Values.global.allowICMPNetworkPolicy false | quote }}
       # end of container
       volumes:
       # TODO: Need to check why we need this?
@@ -192,5 +209,8 @@ spec:
         hostPath:
           path: /etc/ovn
           type: DirectoryOrCreate
+      - name: ovnkube-config
+        configMap:
+          name: ovnkube-config
       tolerations:
       - operator: "Exists"

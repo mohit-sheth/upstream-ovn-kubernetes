@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package udnenabledsvc
 
 import (
@@ -19,10 +22,11 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -64,7 +68,7 @@ func NewController(nbClient libovsdbclient.Client, addressSetFactory addressset.
 		addressSetMu:      &sync.Mutex{},
 		serviceInformer:   serviceInformer,
 		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
-			workqueue.NewTypedItemFastSlowRateLimiter[string](time.Second, 5*time.Second, 5),
+			controllerutil.DefaultRateLimiter[string](),
 			workqueue.TypedRateLimitingQueueConfig[string]{Name: "udnenabledservice"},
 		),
 		cache:    make(map[string][]string),
@@ -272,7 +276,7 @@ func (c *Controller) onServiceAdd(obj interface{}) {
 	if !c.services.Has(key) {
 		return
 	}
-	c.queue.AddRateLimited(key)
+	c.queue.Add(key)
 }
 
 func (c *Controller) onServiceUpdate(_, newObj interface{}) {
@@ -284,7 +288,7 @@ func (c *Controller) onServiceUpdate(_, newObj interface{}) {
 	if !c.services.Has(key) {
 		return
 	}
-	c.queue.AddRateLimited(key)
+	c.queue.Add(key)
 }
 
 func (c *Controller) onServiceDelete(obj interface{}) {
@@ -296,5 +300,5 @@ func (c *Controller) onServiceDelete(obj interface{}) {
 	if !c.services.Has(key) {
 		return
 	}
-	c.queue.AddRateLimited(key)
+	c.queue.Add(key)
 }

@@ -1,31 +1,44 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
+	cnitypes "github.com/containernetworking/cni/pkg/types"
+	current "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/gorilla/mux"
 	nadv1Listers "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
+	nadutils "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/utils"
 
 	"k8s.io/client-go/kubernetes"
 	corev1listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
 	"github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/udn"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
+
+const kubeletDefaultCRIOperationTimeout = 2 * time.Minute
+const resourceNameAnnot = "k8s.v1.cni.cncf.io/resourceName"
 
 // *** The Server is PRIVATE API between OVN components and may be
 // changed at any time.  It is in no way a supported interface or API. ***
@@ -58,10 +71,11 @@ func NewCNIServer(
 	kclient kubernetes.Interface,
 	networkManager networkmanager.Interface,
 	ovsClient client.Client,
+	dpuHealth DPUStatusProvider,
 ) (*Server, error) {
 	var nadLister nadv1Listers.NetworkAttachmentDefinitionLister
 
-	if config.OvnKubeNode.Mode == types.NodeModeDPU {
+	if config.IsModeDPU() {
 		return nil, fmt.Errorf("unsupported ovnkube-node mode for CNI server: %s", config.OvnKubeNode.Mode)
 	}
 
@@ -85,9 +99,9 @@ func NewCNIServer(
 			KubeAPIToken:     config.Kubernetes.Token,
 			KubeAPITokenFile: config.Kubernetes.TokenFile,
 		},
-		handlePodRequestFunc: HandlePodRequest,
-		networkManager:       networkManager,
-		ovsClient:            ovsClient,
+		networkManager: networkManager,
+		ovsClient:      ovsClient,
+		dpuHealth:      dpuHealth,
 	}
 
 	if len(config.Kubernetes.CAData) > 0 {
@@ -99,6 +113,15 @@ func NewCNIServer(
 	router.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		result, err := s.handleCNIRequest(r)
 		if err != nil {
+			var cniErr *cnitypes.Error
+			if errors.As(err, &cniErr) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				if encodeErr := json.NewEncoder(w).Encode(cniErr); encodeErr != nil {
+					klog.Warningf("Failed to write CNI error response: %v", encodeErr)
+				}
+				return
+			}
 			http.Error(w, fmt.Sprintf("%v", err), http.StatusBadRequest)
 			return
 		}
@@ -134,15 +157,24 @@ func gatherCNIArgs(env map[string]string) (map[string]string, error) {
 	return mapArgs, nil
 }
 
-func cniRequestToPodRequest(cr *Request) (*PodRequest, error) {
+func cniRequestToPodRequest(cr *Request, ctx context.Context) (*PodRequest, error) {
 	cmd, ok := cr.Env["CNI_COMMAND"]
 	if !ok {
 		return nil, fmt.Errorf("unexpected or missing CNI_COMMAND")
 	}
 
 	req := &PodRequest{
-		Command: command(cmd),
+		Command:   command(cmd),
+		timestamp: time.Now(),
+		ctx:       ctx,
 	}
+
+	conf, err := config.ReadCNIConfig(cr.Config)
+	if err != nil {
+		return nil, fmt.Errorf("broken stdin args")
+	}
+	req.CNIConf = conf
+	req.deviceInfo = cr.DeviceInfo
 
 	req.SandboxID, ok = cr.Env["CNI_CONTAINERID"]
 	if !ok {
@@ -182,63 +214,249 @@ func cniRequestToPodRequest(cr *Request) (*PodRequest, error) {
 	// containerd 1.5: https://github.com/containerd/containerd/pull/5643
 	req.PodUID = cniArgs["K8S_POD_UID"]
 
-	conf, err := config.ReadCNIConfig(cr.Config)
-	if err != nil {
-		return nil, fmt.Errorf("broken stdin args")
-	}
-
 	// the first network to the Pod is always named as `default`,
 	// capture the effective NAD Name here
 	req.netName = conf.Name
 	if req.netName == types.DefaultNetworkName {
 		req.nadName = types.DefaultNetworkName
+		req.nadKey = types.DefaultNetworkName
 	} else {
 		req.nadName = conf.NADName
 	}
 
-	if conf.DeviceID != "" {
-		if util.IsPCIDeviceName(conf.DeviceID) {
-			// DeviceID is a PCI address
-			req.IsVFIO = util.GetSriovnetOps().IsVfPciVfioBound(conf.DeviceID)
-		} else if util.IsAuxDeviceName(conf.DeviceID) {
-			// DeviceID is an Auxiliary device name - <driver_name>.<kind_of_a_type>.<id>
-			chunks := strings.Split(conf.DeviceID, ".")
-			if chunks[1] != "sf" {
-				return nil, fmt.Errorf("only SF auxiliary devices are supported")
-			}
-		} else {
-			return nil, fmt.Errorf("expected PCI or Auxiliary device name, got - %s", conf.DeviceID)
-		}
+	if err = updateDeviceInfo(req); err != nil {
+		return nil, err
 	}
-
-	req.CNIConf = conf
-	req.deviceInfo = cr.DeviceInfo
-	req.timestamp = time.Now()
-	// Match the Kubelet default CRI operation timeout of 2m
-	req.ctx, req.cancel = context.WithTimeout(context.Background(), 2*time.Minute)
 	return req, nil
+}
+
+func updateDeviceInfo(pr *PodRequest) error {
+	if pr.CNIConf.DeviceID == "" {
+		return nil
+	}
+	if util.IsPCIDeviceName(pr.CNIConf.DeviceID) {
+		// DeviceID is a PCI address
+		pr.IsVFIO = util.GetSriovnetOps().IsVfPciVfioBound(pr.CNIConf.DeviceID)
+	} else if util.IsAuxDeviceName(pr.CNIConf.DeviceID) {
+		// DeviceID is an Auxiliary device name - <driver_name>.<kind_of_a_type>.<id>
+		chunks := strings.Split(pr.CNIConf.DeviceID, ".")
+		if len(chunks) < 2 {
+			return fmt.Errorf("invalid auxiliary device name %q: expected driver.<type>.<id>", pr.CNIConf.DeviceID)
+		}
+		if chunks[1] != "sf" {
+			return fmt.Errorf("only SF auxiliary devices are supported, device name %q is not supported", pr.CNIConf.DeviceID)
+		}
+	} // else it is a netdev name, which is used for simulated DPU environments.
+	return nil
 }
 
 // Dispatch a pod request to the request handler and return the result to the
 // CNI server client
-func (s *Server) handleCNIRequest(r *http.Request) ([]byte, error) {
+func (s *Server) handleCNIRequest(r *http.Request) (result []byte, err error) {
 	var cr Request
 	b, _ := io.ReadAll(r.Body)
 	if err := json.Unmarshal(b, &cr); err != nil {
 		return nil, err
 	}
-	req, err := cniRequestToPodRequest(&cr)
+	// Match the Kubelet default CRI operation timeout of 2m.
+	ctx, cancel := context.WithTimeout(context.Background(), kubeletDefaultCRIOperationTimeout)
+	defer cancel()
+
+	cmd, ok := cr.Env["CNI_COMMAND"]
+	if !ok {
+		return nil, fmt.Errorf("unexpected or missing CNI_COMMAND")
+	}
+	command := command(cmd)
+
+	if err = s.checkDPUHealth(command); err != nil {
+		klog.Infof("%s finished CNI request, err %v", command, err)
+		return nil, err
+	}
+
+	if command == CNICheck || command == CNIStatus || command == CNIUpdate {
+		// CNICheck is not considered useful, and has a considerable performance impact
+		// to pod bring up times with CRIO. This is due to the fact that CRIO currently calls check
+		// after CNI ADD before it finishes bringing the container up
+		// CNIUpdate is no-op today
+		// CNIStatus is handled by DPU health check gating before reaching here
+		klog.Infof("%s finished CNI request, err=nil", command)
+		return nil, nil
+	}
+
+	request, err := cniRequestToPodRequest(&cr, ctx)
+	if err != nil {
+		klog.Infof("Failed to convert CNI request %+v to PodRequest, err %v", cr, err)
+		return nil, err
+	}
+	var response *Response
+	defer func() {
+		var resultForLogging []byte
+		var loggingErr error
+		if response != nil {
+			if resultForLogging, loggingErr = response.MarshalForLogging(); loggingErr != nil {
+				klog.Errorf("%s %s CNI request %+v, %v", request, request.Command, request, loggingErr)
+			}
+		}
+		klog.Infof("%s %s finished CNI request %+v, result %q, err %v",
+			request, request.Command, request, string(resultForLogging), err)
+		if err != nil {
+			// Prefix error with request information for easier debugging
+			var cniErr *cnitypes.Error
+			if !errors.As(err, &cniErr) {
+				err = fmt.Errorf("%s %w", request, err)
+			}
+		}
+	}()
+
+	klog.Infof("%s %s starting CNI request", request, request.Command)
+	switch request.Command {
+	case CNIAdd:
+		response, err = request.cmdAdd(s.kubeAuth, s.clientSet, s.ovsClient)
+	case CNIDel:
+		response, err = request.cmdDel(s.clientSet)
+	default:
+		err = fmt.Errorf("unsupported CNI command %s", request.Command)
+	}
+
 	if err != nil {
 		return nil, err
 	}
-	defer req.cancel()
 
-	result, err := s.handlePodRequestFunc(req, s.clientSet, s.kubeAuth, s.networkManager, s.ovsClient)
-	if err != nil {
-		// Prefix error with request information for easier debugging
-		return nil, fmt.Errorf("%s %v", req, err)
+	// check if this is a default network request for a pod with primary UDN
+	// and create a primary interface if so
+	if request.Command == CNIAdd {
+		// We don't do anything extra for CNIDel, because UnconfigureInterface already deletes all ports
+		// for a given pod from OVS, also some other cleanup are done in batch in cmdDel
+		primaryPodRequest, err := s.getPrimaryUDNPodRequest(request)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get primary UDN pod request: %v", err)
+		}
+		if primaryPodRequest != nil {
+			klog.V(4).Infof("Pod %s/%s primaryUDN podRequest %v", primaryPodRequest.PodNamespace, primaryPodRequest.PodName, primaryPodRequest)
+			primaryResponse, err := primaryPodRequest.cmdAdd(s.kubeAuth, s.clientSet, s.ovsClient)
+			if err != nil {
+				return nil, fmt.Errorf("failed to add primary UDN pod request: %v", err)
+			}
+			// merge primary response into the original response
+			mergePrimaryUDNResponse(response, primaryResponse, primaryPodRequest)
+		}
 	}
+
+	if result, err = response.Marshal(); err != nil {
+		return nil, fmt.Errorf("failed to marshal result: %v", err)
+	}
+
 	return result, nil
+}
+
+func (s *Server) getPrimaryUDNPodRequest(originalPodRequest *PodRequest) (*PodRequest, error) {
+	if !util.IsNetworkSegmentationSupportEnabled() {
+		return nil, nil
+	}
+	// check if this a default network request for a pod with primary UDN
+	// and create a primary interface if so
+	if originalPodRequest.nadName != types.DefaultNetworkName {
+		return nil, nil
+	}
+	podNamespace := originalPodRequest.PodNamespace
+	podName := originalPodRequest.PodName
+	// this function is only called after the default network is set up, so the pod should already be in the
+	// network manager's cache and have an active network
+	activeNetwork, err := s.networkManager.GetActiveNetworkForNamespace(podNamespace)
+	if err != nil {
+		return nil, err
+	}
+	// CNI should always have an active network for a pod on our node
+	if activeNetwork == nil {
+		return nil, fmt.Errorf("no active network found for namespace %s", podNamespace)
+	}
+	if activeNetwork.IsDefault() {
+		// there is no primary NAD
+		return nil, nil
+	}
+	primaryNADKey, err := s.networkManager.GetPrimaryNADForNamespace(podNamespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary NAD for namespace %s: %v", podNamespace, err)
+	}
+
+	primaryPodRequest := &PodRequest{
+		Command:      originalPodRequest.Command,
+		PodNamespace: originalPodRequest.PodNamespace,
+		PodName:      originalPodRequest.PodName,
+		PodUID:       originalPodRequest.PodUID,
+		SandboxID:    originalPodRequest.SandboxID,
+		Netns:        originalPodRequest.Netns,
+		IfName:       "ovn-udn1",
+		timestamp:    time.Now(),
+		ctx:          originalPodRequest.ctx,
+		CNIConf: &ovncnitypes.NetConf{
+			// primary UDN MTU will be taken from config.Default.MTU
+			// if not specified at the NAD
+			MTU: activeNetwork.MTU(),
+		},
+		netName: activeNetwork.GetNetworkName(),
+		nadName: primaryNADKey,
+		nadKey:  primaryNADKey,
+	}
+	// To support for non VFIO devices like SRIOV, get the primary UDN's resource name
+	nadNamespace, nadName, err := cache.SplitMetaNamespaceKey(primaryNADKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid NAD name %s", primaryNADKey)
+	}
+	nad, err := s.clientSet.nadLister.NetworkAttachmentDefinitions(nadNamespace).Get(nadName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get primary UDN's network-attachment-definition %s: %v", nadName, err)
+	}
+	resourceName := nad.Annotations[resourceNameAnnot]
+	if resourceName != "" {
+		pod, err := s.clientSet.getPod(podNamespace, podName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get pod %s/%s: %v", podNamespace, podName, err)
+		}
+		deviceID, err := udn.GetPodPrimaryUDNDeviceID(pod, resourceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get primary UDN device ID for pod %s/%s resource %s: %v",
+				pod.Namespace, pod.Name, resourceName, err)
+		}
+		primaryPodRequest.CNIConf.DeviceID = deviceID
+		deviceInfo, err := nadutils.LoadDeviceInfoFromDP(resourceName, deviceID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load primary UDN's device info for pod %s/%s resource %s deviceID %s: %w",
+				pod.Namespace, pod.Name, resourceName, deviceID, err)
+		}
+		primaryPodRequest.deviceInfo = *deviceInfo
+	}
+	if err = updateDeviceInfo(primaryPodRequest); err != nil {
+		return nil, err
+	}
+	return primaryPodRequest, nil
+}
+
+func mergePrimaryUDNResponse(originalResponse, primaryResponse *Response, primaryPodRequest *PodRequest) {
+	// merge primary response into the original response
+	if originalResponse == nil || primaryResponse == nil {
+		return
+	}
+	if !config.UnprivilegedMode {
+		result := originalResponse.Result
+		primaryUDNResult := primaryResponse.Result
+		result.Routes = append(result.Routes, primaryUDNResult.Routes...)
+		numOfInitialIPs := len(result.IPs)
+		numOfInitialIfaces := len(result.Interfaces)
+		result.Interfaces = append(result.Interfaces, primaryUDNResult.Interfaces...)
+		result.IPs = append(result.IPs, primaryUDNResult.IPs...)
+
+		// Offset the index of the default network IPs to correctly point to the default network interfaces
+		for i := numOfInitialIPs; i < len(result.IPs); i++ {
+			ifaceIPConfig := result.IPs[i].Copy()
+			if result.IPs[i].Interface != nil {
+				result.IPs[i].Interface = current.Int(*ifaceIPConfig.Interface + numOfInitialIfaces)
+			}
+		}
+	} else {
+		originalResponse.PrimaryUDNPodReq = primaryPodRequest
+		originalResponse.PrimaryUDNPodInfo = primaryResponse.PodIFInfo
+	}
 }
 
 func (s *Server) handleCNIMetrics(w http.ResponseWriter, r *http.Request) {
@@ -257,4 +475,28 @@ func (s *Server) handleCNIMetrics(w http.ResponseWriter, r *http.Request) {
 	if _, err := w.Write([]byte{}); err != nil {
 		klog.Warningf("Error writing %s HTTP response for metrics post", err)
 	}
+}
+
+func (s *Server) checkDPUHealth(cmd command) error {
+	if s.dpuHealth == nil || config.IsModeDPU() || config.IsModeFull() {
+		return nil
+	}
+
+	if cmd != CNIAdd && cmd != CNIStatus {
+		return nil
+	}
+
+	ready, reason := s.dpuHealth.Ready()
+	if ready {
+		return nil
+	}
+
+	msg := dpuNotReadyMsg
+	if reason != "" {
+		msg = fmt.Sprintf("%s: %s", msg, reason)
+	}
+	if cmd == CNIStatus {
+		return &cnitypes.Error{Code: 50, Msg: msg}
+	}
+	return fmt.Errorf("%s", msg)
 }

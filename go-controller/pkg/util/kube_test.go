@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -16,8 +19,8 @@ import (
 	clientsetfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	kubetest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	kubetest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
 )
 
 // Go Daddy Class 2 CA
@@ -615,14 +618,14 @@ func TestHasLocalHostNetworkEndpoints(t *testing.T) {
 		{
 			"Tests with local endpoints that include the node address",
 			PortToLBEndpoints{"test": LBEndpoints{
-				V4IPs: []string{ep1Address, ep2Address},
+				{V4IPs: []string{ep1Address, ep2Address}},
 			}},
 			true,
 		},
 		{
 			"Tests against a different local endpoint than the node address",
 			PortToLBEndpoints{"test": LBEndpoints{
-				V4IPs: []string{ep2Address},
+				{V4IPs: []string{ep2Address}},
 			}},
 			false,
 		},

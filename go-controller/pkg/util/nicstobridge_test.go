@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -9,10 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	netlink_mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
-	mock_k8s_io_utils_exec "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/utils/exec"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/mocks"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	netlink_mocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
+	mock_k8s_io_utils_exec "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/k8s.io/utils/exec"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/mocks"
 )
 
 func TestGetNicName(t *testing.T) {
@@ -20,7 +23,7 @@ func TestGetNicName(t *testing.T) {
 	mockExecRunner := new(mocks.ExecRunner)
 	mockCmd := new(mock_k8s_io_utils_exec.Cmd)
 	// below is defined in ovs.go
-	runCmdExecRunner = mockExecRunner
+	RunCmdExecRunner = mockExecRunner
 	// note runner is defined in ovs.go file
 	runner = &execHelper{exec: mockKexecIface}
 	tests := []struct {
@@ -408,7 +411,7 @@ func TestNicToBridge(t *testing.T) {
 	mockExecRunner := new(mocks.ExecRunner)
 	mockCmd := new(mock_k8s_io_utils_exec.Cmd)
 	// below is defined in ovs.go
-	runCmdExecRunner = mockExecRunner
+	RunCmdExecRunner = mockExecRunner
 	// note runner is defined in ovs.go file
 	runner = &execHelper{exec: mockKexecIface}
 
@@ -577,7 +580,7 @@ func TestBridgeToNic(t *testing.T) {
 	mockExecRunner := new(mocks.ExecRunner)
 	mockCmd := new(mock_k8s_io_utils_exec.Cmd)
 	// below is defined in ovs.go
-	runCmdExecRunner = mockExecRunner
+	RunCmdExecRunner = mockExecRunner
 	// note runner is defined in ovs.go file
 	runner = &execHelper{exec: mockKexecIface}
 

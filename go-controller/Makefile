@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 OUT_DIR = _output
 export OUT_DIR
 PREFIX ?= ${DESTDIR}/usr
@@ -11,7 +14,7 @@ PKGS ?=
 GOPATH ?= $(shell go env GOPATH)
 TEST_REPORT_DIR?=$(CURDIR)/_artifacts
 export TEST_REPORT_DIR
-GO_VERSION ?= 1.24
+GO_VERSION ?= 1.25
 GO_DOCKER_IMG = quay.io/projectquay/golang:${GO_VERSION}
 # CONTAINER_RUNNABLE determines if the tests can be run inside a container. It checks to see if
 # podman/docker is installed on the system.
@@ -51,7 +54,7 @@ export NOROOT
 #       (disables symbol table and DWARF generation when building ovnk binaries)
 
 all build:
-	hack/build-go.sh cmd/ovnkube cmd/ovn-k8s-cni-overlay cmd/ovn-kube-util hybrid-overlay/cmd/hybrid-overlay-node cmd/ovndbchecker cmd/ovnkube-trace cmd/ovnkube-identity cmd/ovnkube-observ
+	hack/build-go.sh cmd/ovnkube cmd/ovn-k8s-cni-overlay cmd/ovn-kube-util hybrid-overlay/cmd/hybrid-overlay-node cmd/ovnkube-trace cmd/ovnkube-identity cmd/ovnkube-observ
 
 windows:
 	WINDOWS_BUILD="yes" hack/build-go.sh hybrid-overlay/cmd/hybrid-overlay-node
@@ -60,7 +63,7 @@ windows:
 # tests in a container. Refer: https://www.projectatomic.io/blog/2016/03/dwalsh_selinux_containers/ for additional context
 check test:
 ifeq ($(CONTAINER_RUNNABLE), 0)
-	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable ${C_ARGS} -v $(shell dirname $(PWD)):/go/src/github.com/ovn-org/ovn-kubernetes -w /go/src/github.com/ovn-org/ovn-kubernetes/go-controller -e COVERALLS=${COVERALLS} -e GINKGO_FOCUS="${GINKGO_FOCUS}" $(GO_DOCKER_IMG) sh -c "RACE=1 DOCKER_TEST=1 COVERALLS=${COVERALLS} PKGS="${PKGS}" hack/test-go.sh focus \"${GINKGO_FOCUS}\" "
+	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable ${C_ARGS} -v $(shell dirname $(PWD)):/go/src/github.com/ovn-kubernetes/ovn-kubernetes -w /go/src/github.com/ovn-kubernetes/ovn-kubernetes/go-controller -e COVERALLS=${COVERALLS} -e GINKGO_FOCUS="${GINKGO_FOCUS}" $(GO_DOCKER_IMG) sh -c "RACE=1 DOCKER_TEST=1 COVERALLS=${COVERALLS} PKGS="${PKGS}" hack/test-go.sh focus \"${GINKGO_FOCUS}\" "
 else
 	RACE=1 hack/test-go.sh
 endif
@@ -79,7 +82,6 @@ install:
 	install -D -m 755 ${OUT_DIR}/go/bin/ovnkube ${BINDIR}/
 	install -D -m 755 ${OUT_DIR}/go/bin/ovn-kube-util ${BINDIR}/
 	install -D -m 755 ${OUT_DIR}/go/bin/ovn-k8s-cni-overlay -t ${CNIBINDIR}/
-	install -D -m 755 ${OUT_DIR}/go/bin/ovndbchecker ${BINDIR}/
 
 clean:
 	rm -rf ${OUT_DIR}
@@ -88,7 +90,7 @@ clean:
 	rm -f ./pkg/sbdb/ovn-sb.ovsschema
 	rm -f ./pkg/vswitchd/vswitch.ovsschema
 
-.PHONY: lint gofmt verify-go-mod-vendor
+.PHONY: lint gofmt verify-go-mod-vendor third-party-licenses verify-third-party-licenses
 
 lint:
 ifeq ($(CONTAINER_RUNNABLE), 0)
@@ -110,7 +112,7 @@ endif
 
 gofmt:
 ifeq ($(CONTAINER_RUNNABLE), 0)
-	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable -v $(shell dirname $(PWD)):/go/src/github.com/ovn-org/ovn-kubernetes -w /go/src/github.com/ovn-org/ovn-kubernetes/go-controller $(GO_DOCKER_IMG) hack/verify-gofmt.sh
+	$(CONTAINER_RUNTIME) run -it --rm --security-opt label=disable -v $(shell dirname $(PWD)):/go/src/github.com/ovn-kubernetes/ovn-kubernetes -w /go/src/github.com/ovn-kubernetes/ovn-kubernetes/go-controller $(GO_DOCKER_IMG) hack/verify-gofmt.sh
 else
 	@./hack/verify-gofmt.sh
 endif
@@ -121,6 +123,12 @@ ifeq ($(CONTAINER_RUNNABLE), 0)
 else
 	@./hack/verify-go-mod-vendor.sh
 endif
+
+third-party-licenses:
+	@GOPATH=${GOPATH} ./hack/update-third-party-licenses.sh || { echo "third-party license generation failed!"; exit 1; }
+
+verify-third-party-licenses:
+	@GOPATH=${GOPATH} ./hack/verify-third-party-licenses.sh || { echo "third-party license verification failed!"; exit 1; }
 
 pkg/nbdb/ovn-nb.ovsschema:
 	curl -sSL https://raw.githubusercontent.com/ovn-org/ovn/$(OVN_SCHEMA_VERSION)/ovn-nb.ovsschema -o $@

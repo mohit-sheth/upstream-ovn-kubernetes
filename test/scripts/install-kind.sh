@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 
 set -ex
 ARCH=""
@@ -45,7 +48,7 @@ install_kind() {
 }
 
 pushd $TMP_DIR
-K8S_VERSION="v1.34.0"
+K8S_VERSION="v1.35.0"
 
 # Install kubectl for K8S_VERSION in use
 curl -sL https://dl.k8s.io/${K8S_VERSION}/kubernetes-client-linux-${ARCH}.tar.gz | sudo tar xvz -C /usr/local/bin kubernetes/client/bin/kubectl --strip-components 3
@@ -58,25 +61,18 @@ sudo mv kubernetes/test/bin/e2e.test /usr/local/bin/e2e.test
 sudo mv kubernetes/test/bin/ginkgo /usr/local/bin/ginkgo
 rm kubernetes-test-linux-${ARCH}.tar.gz
 
-if [ "$USE_HELM" == true ]; then
-    HELM_VERSION="v3.17.2"
-	# to get latest stable version: https://github.com/helm/helm/releases
-    curl -L  https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz -o helm-linux-${ARCH}.tar.gz
-	tar xvzf helm-linux-${ARCH}.tar.gz
-    chmod +x ./linux-${ARCH}/helm
-	sudo mv linux-${ARCH}/helm /usr/local/bin/
-	rm helm-linux-${ARCH}.tar.gz
-fi
+HELM_VERSION="v3.17.2"
+# to get latest stable version: https://github.com/helm/helm/releases
+curl -L  https://get.helm.sh/helm-${HELM_VERSION}-linux-${ARCH}.tar.gz -o helm-linux-${ARCH}.tar.gz
+tar xvzf helm-linux-${ARCH}.tar.gz
+chmod +x ./linux-${ARCH}/helm
+sudo mv linux-${ARCH}/helm /usr/local/bin/
+rm helm-linux-${ARCH}.tar.gz
 
 install_kind
 popd # go out of $TMP_DIR
 
 pushd $SCRIPT_DIR/../../contrib
-if [ "$USE_HELM" == true ]; then
-    ./kind-helm.sh
-else
-    ./kind.sh
-fi
-
+./kind-helm.sh
 popd # go our of $SCRIPT_DIR/../../contrib
 

@@ -1,6 +1,10 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net"
@@ -26,7 +30,7 @@ import (
 	kexec "k8s.io/utils/exec"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // getSupportedPlatformTypes returns a list of all supported platform types
@@ -76,7 +80,7 @@ var (
 	// ovn-kubernetes build date
 	BuildDate = ""
 	// ovn-kubernetes version, to be changed with every release
-	Version = "1.2.0"
+	Version = "1.3.0"
 	// version of the go runtime used to compile ovn-kubernetes
 	GoVersion = runtime.Version()
 	// os and architecture used to build ovn-kubernetes
@@ -101,6 +105,7 @@ var (
 		RawClusterSubnets:            "10.128.0.0/14/23",
 		Zone:                         types.OvnDefaultZone,
 		RawUDNAllowedDefaultServices: "default/kubernetes,kube-system/kube-dns",
+		Transport:                    "",
 	}
 
 	// Logging holds logging-related parsed config file parameters and command-line overrides
@@ -154,10 +159,11 @@ var (
 	// Metrics holds Prometheus metrics-related parameters.
 	Metrics MetricsConfig
 
-	// OVNKubernetesFeatureConfig holds OVN-Kubernetes feature enhancement config file parameters and command-line overrides
+	// OVNKubernetesFeature config holds OVN-Kubernetes feature enhancement config file parameters and command-line overrides
 	OVNKubernetesFeature = OVNKubernetesFeatureConfig{
 		EgressIPReachabiltyTotalTimeout: 1,
 		AdvertisedUDNIsolationMode:      AdvertisedUDNIsolationModeStrict,
+		UDNDeletionGracePeriod:          120 * time.Second,
 	}
 
 	// OvnNorth holds northbound OVN database client and server authentication and location details
@@ -200,13 +206,6 @@ var (
 	// Set Leaderelection config values based on
 	// https://github.com/openshift/enhancements/blame/84e894ead7b188a1013556e0ba6973b8463995f1/CONVENTIONS.md#L183
 
-	// MasterHA holds master HA related config options.
-	MasterHA = HAConfig{
-		ElectionRetryPeriod:   26,
-		ElectionRenewDeadline: 107,
-		ElectionLeaseDuration: 137,
-	}
-
 	// ClusterMgrHA holds cluster manager HA related config options.
 	ClusterMgrHA = HAConfig{
 		ElectionRetryPeriod:   26,
@@ -233,12 +232,22 @@ var (
 
 	// OvnKubeNode holds ovnkube-node parsed config file parameters and command-line overrides
 	OvnKubeNode = OvnKubeNodeConfig{
-		Mode: types.NodeModeFull,
+		Mode:                      types.NodeModeFull,
+		DPUNodeLeaseRenewInterval: 10,
+		DPUNodeLeaseDuration:      40,
 	}
 
 	ClusterManager = ClusterManagerConfig{
 		V4TransitSubnet: "100.88.0.0/16",
 		V6TransitSubnet: "fd97::/64",
+	}
+
+	// NoOverlay holds no-overlay mode configuration
+	NoOverlay = NoOverlayConfig{}
+
+	// ManagedBGP holds managed BGP configuration
+	ManagedBGP = ManagedBGPConfig{
+		ASNumber: 64512, // Default AS number
 	}
 
 	// Layer2UsesTransitRouter indicated whether the layer2 primary networks will use transit router.
@@ -250,6 +259,17 @@ const (
 	kubeServiceAccountPath       string = "/var/run/secrets/kubernetes.io/serviceaccount/"
 	kubeServiceAccountFileToken  string = "token"
 	kubeServiceAccountFileCACert string = "ca.crt"
+)
+
+// No-overlay mode configuration option constants
+const (
+	// NoOverlayRoutingManaged indicates OVN-Kubernetes manages the routing
+	NoOverlayRoutingManaged string = "managed"
+	// NoOverlayRoutingUnmanaged indicates users manage the routing themselves
+	NoOverlayRoutingUnmanaged string = "unmanaged"
+
+	// ManagedBGPTopologyFullMesh represents a full-mesh BGP topology
+	ManagedBGPTopologyFullMesh string = "full-mesh"
 )
 
 // DefaultConfig holds parsed config file parameters and command-line overrides
@@ -335,6 +355,11 @@ type DefaultConfig struct {
 	// UDNAllowedDefaultServices holds a list of namespaced names of
 	// default cluster network services accessible from primary user-defined networks
 	UDNAllowedDefaultServices []string
+
+	// Transport specifies the transport technology used for the default network.
+	// Accepts: "" (empty, uses OVN default overlay) or "no-overlay".
+	// Defaults to "" (empty).
+	Transport string `gcfg:"transport"`
 }
 
 // LoggingConfig holds logging-related parsed config file parameters and command-line overrides
@@ -406,6 +431,7 @@ type KubernetesConfig struct {
 	CertDuration            time.Duration `gcfg:"cert-duration"`
 	Kubeconfig              string        `gcfg:"kubeconfig"`
 	CACert                  string        `gcfg:"cacert"`
+	CACertData              string        `gcfg:"cacert-data"`
 	CAData                  []byte
 	APIServer               string `gcfg:"apiserver"`
 	Token                   string `gcfg:"token"`
@@ -441,7 +467,7 @@ type MetricsConfig struct {
 	EnablePprof           bool   `gcfg:"enable-pprof"`
 	NodeServerPrivKey     string `gcfg:"node-server-privkey"`
 	NodeServerCert        string `gcfg:"node-server-cert"`
-	// EnableConfigDuration holds the boolean flag to enable OVN-Kubernetes master to monitor OVN-Kubernetes master
+	// EnableConfigDuration holds the boolean flag to enable ovnkube controller to monitor ovnkube controller
 	// configuration duration and optionally, its application to all nodes
 	EnableConfigDuration bool `gcfg:"enable-config-duration"`
 	EnableScaleMetrics   bool `gcfg:"enable-scale-metrics"`
@@ -464,18 +490,23 @@ type OVNKubernetesFeatureConfig struct {
 	EnableNetworkConnect            bool `gcfg:"enable-network-connect"`
 	EnablePreconfiguredUDNAddresses bool `gcfg:"enable-preconfigured-udn-addresses"`
 	EnableRouteAdvertisements       bool `gcfg:"enable-route-advertisements"`
+	EnableEVPN                      bool `gcfg:"enable-evpn"`
 	EnableMultiNetworkPolicy        bool `gcfg:"enable-multi-networkpolicy"`
 	EnableStatelessNetPol           bool `gcfg:"enable-stateless-netpol"`
-	EnableInterconnect              bool `gcfg:"enable-interconnect"`
 	EnableMultiExternalGateway      bool `gcfg:"enable-multi-external-gateway"`
 	EnablePersistentIPs             bool `gcfg:"enable-persistent-ips"`
 	EnableDNSNameResolver           bool `gcfg:"enable-dns-name-resolver"`
 	EnableServiceTemplateSupport    bool `gcfg:"enable-svc-template-support"`
 	EnableObservability             bool `gcfg:"enable-observability"`
 	EnableNetworkQoS                bool `gcfg:"enable-network-qos"`
+	AllowICMPNetworkPolicy          bool `gcfg:"allow-icmp-network-policy"`
 	// This feature requires a kernel fix https://github.com/torvalds/linux/commit/7f3287db654395f9c5ddd246325ff7889f550286
 	// to work on a kind cluster. Flag allows to disable it for current CI, will be turned on when github runners have this fix.
 	AdvertisedUDNIsolationMode string `gcfg:"advertised-udn-isolation-mode"`
+	EnableDynamicUDNAllocation bool   `gcfg:"enable-dynamic-udn-allocation"`
+	// UDNDeletionGracePeriod specified in number of seconds to wait before garbage collecting a UDN. Applies
+	// only when Dynamic UDN Allocation is enabled.
+	UDNDeletionGracePeriod time.Duration `gcfg:"udn-deletion-grace-period"`
 }
 
 // GatewayMode holds the node gateway mode
@@ -508,6 +539,12 @@ type GatewayConfig struct {
 	// on the external bridge. The Host IP would be on this device.
 	// Should be used mutually exclusive to the `--gateway-interface` flag.
 	GatewayAcceleratedInterface string `gcfg:"gateway-accelerated-interface"`
+	// DPUHostGatewayRepresentorInterface is the DPU-side representor of the host's
+	// uplink (PF). For some DPUs this is discovered automatically via
+	// phys_port_name via switchdev metadata. In simulated environments or other
+	// interpretations of DPUs, it must be specified explicitly
+	// because the interface has no switchdev metadata.
+	DPUHostGatewayRepresentorInterface string `gcfg:"dpu-host-gateway-representor-interface"`
 	// Egress gateway interface is the optional network interface to use for external gw pods traffic.
 	EgressGWInterface string `gcfg:"egw-interface"`
 	// NextHop is the gateway IP address of Interface; will be autodetected if not given
@@ -551,17 +588,25 @@ type GatewayConfig struct {
 }
 
 // OvnAuthConfig holds client authentication and location details for
-// an OVN database (either northbound or southbound)
+// an OVN database (either northbound or southbound). Since central mode
+// was removed, ovnkube components always connect to a local OVN NB/SB
+// database via unix sockets; the connection address is derived from
+// RunDir + northbound and is not user-configurable.
 type OvnAuthConfig struct {
-	// e.g: "ssl:192.168.1.2:6641,ssl:192.168.1.2:6642"
-	Address        string `gcfg:"address"`
+	// TODO: PrivKey/Cert/CACert/CertCommonName are no longer used for OVN
+	// DB connection (which is unix-socket only since central mode was
+	// removed). They remain here because
+	// pkg/ovn/healthcheck/egressip_healthcheck.go reads them from
+	// config.OvnNorth as TLS material for the Egress IP gRPC health-check
+	// channel — a historical artifact of central mode where ovnkube-node
+	// already had OVN-NB SSL certs mounted. They should be moved to a
+	// dedicated NodeCert / EgressIPTLS struct in a follow-up PR.
 	PrivKey        string `gcfg:"client-privkey"`
 	Cert           string `gcfg:"client-cert"`
 	CACert         string `gcfg:"client-cacert"`
 	CertCommonName string `gcfg:"cert-common-name"`
-	Scheme         OvnDBScheme
-	ElectionTimer  uint `gcfg:"election-timer"`
-	northbound     bool
+
+	northbound bool
 	// RunDir is OVN run directory.
 	RunDir string `gcfg:"run-dir"`
 	// DbLocation is OVN northbound/southbound database location.
@@ -601,9 +646,12 @@ type HybridOverlayConfig struct {
 
 // OvnKubeNodeConfig holds ovnkube-node configurations
 type OvnKubeNodeConfig struct {
-	Mode                   string `gcfg:"mode"`
-	MgmtPortNetdev         string `gcfg:"mgmt-port-netdev"`
-	MgmtPortDPResourceName string `gcfg:"mgmt-port-dp-resource-name"`
+	Mode                      string `gcfg:"mode"`
+	MgmtPortNetdev            string `gcfg:"mgmt-port-netdev"`
+	MgmtPortDPResourceName    string `gcfg:"mgmt-port-dp-resource-name"`
+	DPUNodeLeaseRenewInterval int    `gcfg:"dpu-node-lease-renew-interval"`
+	DPUNodeLeaseDuration      int    `gcfg:"dpu-node-lease-duration"`
+	SimulateDPU               bool   `gcfg:"simulate-dpu"`
 }
 
 // ClusterManagerConfig holds configuration for ovnkube-cluster-manager
@@ -614,17 +662,36 @@ type ClusterManagerConfig struct {
 	V6TransitSubnet string `gcfg:"v6-transit-subnet"`
 }
 
-// OvnDBScheme describes the OVN database connection transport method
-type OvnDBScheme string
+// NoOverlayConfig holds configuration for no-overlay mode
+type NoOverlayConfig struct {
+	// OutboundSNAT configures SNAT behavior for outbound traffic from pods on the default network.
+	// Supported values: "enabled" or "disabled".
+	// Required when transport=no-overlay.
+	OutboundSNAT string `gcfg:"outbound-snat"`
+	// Routing configures whether the pod network routing configuration is managed by
+	// OVN-Kubernetes or users. Supported values: "managed" or "unmanaged".
+	// Required when transport=no-overlay.
+	Routing string `gcfg:"routing"`
+}
 
-const (
-	// OvnDBSchemeSSL specifies SSL as the OVN database transport method
-	OvnDBSchemeSSL OvnDBScheme = "ssl"
-	// OvnDBSchemeTCP specifies TCP as the OVN database transport method
-	OvnDBSchemeTCP OvnDBScheme = "tcp"
-	// OvnDBSchemeUnix specifies Unix domains sockets as the OVN database transport method
-	OvnDBSchemeUnix OvnDBScheme = "unix"
-)
+// ManagedBGPConfig holds configuration for managed BGP
+type ManagedBGPConfig struct {
+	// ASNumber specifies the AS number to be used by the BGP speakers on each node for its
+	// default VRF when no-overlay networks are configured with managed routing.
+	// It is shared by both the cluster default network and CUDNs.
+	// Supports both 16-bit (1-65535) and 32-bit (1-4294967295) AS numbers.
+	// Optional. Defaults to 64512 if not specified.
+	ASNumber uint32 `gcfg:"as-number"`
+	// Topology configures the BGP peering topology when routing is managed.
+	// Supported values: "full-mesh".
+	// Required when transport=no-overlay and routing=managed.
+	Topology string `gcfg:"topology"`
+	// FRRNamespace specifies the namespace where FRR-K8s FRRConfiguration resources are created
+	// when routing is managed.
+	// In unmanaged mode, the namespace is determined automatically by detecting user-created
+	// FRR-K8s FRRConfiguration resources. Therefore this flag is not needed.
+	FRRNamespace string `gcfg:"frr-namespace"`
+}
 
 // Config is used to read the structured config file and to cache config in testcases
 type config struct {
@@ -639,12 +706,13 @@ type config struct {
 	OvnNorth             OvnAuthConfig
 	OvnSouth             OvnAuthConfig
 	Gateway              GatewayConfig
-	MasterHA             HAConfig
 	ClusterMgrHA         HAConfig
 	HybridOverlay        HybridOverlayConfig
 	OvnKubeNode          OvnKubeNodeConfig
 	ClusterManager       ClusterManagerConfig
 	OvsPaths             OvsPathConfig
+	NoOverlay            NoOverlayConfig  `gcfg:"no-overlay"`
+	ManagedBGP           ManagedBGPConfig `gcfg:"bgp-managed"`
 }
 
 var (
@@ -659,12 +727,13 @@ var (
 	savedOvnNorth             OvnAuthConfig
 	savedOvnSouth             OvnAuthConfig
 	savedGateway              GatewayConfig
-	savedMasterHA             HAConfig
 	savedClusterMgrHA         HAConfig
 	savedHybridOverlay        HybridOverlayConfig
 	savedOvnKubeNode          OvnKubeNodeConfig
 	savedClusterManager       ClusterManagerConfig
 	savedOvsPaths             OvsPathConfig
+	savedNoOverlay            NoOverlayConfig
+	savedManagedBGP           ManagedBGPConfig
 
 	// legacy service-cluster-ip-range CLI option
 	serviceClusterIPRange string
@@ -689,12 +758,13 @@ func init() {
 	savedOvnNorth = OvnNorth
 	savedOvnSouth = OvnSouth
 	savedGateway = Gateway
-	savedMasterHA = MasterHA
 	savedClusterMgrHA = ClusterMgrHA
 	savedHybridOverlay = HybridOverlay
 	savedOvnKubeNode = OvnKubeNode
 	savedClusterManager = ClusterManager
 	savedOvsPaths = OvsPaths
+	savedNoOverlay = NoOverlay
+	savedManagedBGP = ManagedBGP
 	cli.VersionPrinter = func(_ *cli.Context) {
 		fmt.Printf("Version: %s\n", Version)
 		fmt.Printf("Git commit: %s\n", Commit)
@@ -721,11 +791,12 @@ func PrepareTestConfig() error {
 	OvnNorth = savedOvnNorth
 	OvnSouth = savedOvnSouth
 	Gateway = savedGateway
-	MasterHA = savedMasterHA
 	HybridOverlay = savedHybridOverlay
 	OvnKubeNode = savedOvnKubeNode
 	ClusterManager = savedClusterManager
 	OvsPaths = savedOvsPaths
+	NoOverlay = savedNoOverlay
+	ManagedBGP = savedManagedBGP
 	Kubernetes.DisableRequestedChassis = false
 	EnableMulticast = false
 	UnprivilegedMode = false
@@ -748,6 +819,7 @@ func PrepareTestConfig() error {
 	// Don't pick up defaults from the environment
 	os.Unsetenv("KUBECONFIG")
 	os.Unsetenv("K8S_CACERT")
+	os.Unsetenv("K8S_CACERT_DATA")
 	os.Unsetenv("K8S_APISERVER")
 	os.Unsetenv("K8S_TOKEN")
 	os.Unsetenv("K8S_TOKEN_FILE")
@@ -817,10 +889,6 @@ var cliConfig config
 var CommonFlags = []cli.Flag{
 	// Mode flags
 	&cli.StringFlag{
-		Name:  "init-master",
-		Usage: "initialize master (both cluster-manager and ovnkube-controller), requires the hostname as argument",
-	},
-	&cli.StringFlag{
 		Name:  "init-cluster-manager",
 		Usage: "initialize cluster manager (but not ovnkube-controller), requires the hostname as argument",
 	},
@@ -864,7 +932,7 @@ var CommonFlags = []cli.Flag{
 	},
 	&cli.StringFlag{
 		Name:        "encap-type",
-		Usage:       "The encapsulation protocol to use to transmit packets between hypervisors",
+		Usage:       "The encapsulation protocol to use to transmit packets between hypervisors by OVN in overlay mode (geneve, vxlan, gre)",
 		Destination: &cliConfig.Default.EncapType,
 		Value:       Default.EncapType,
 	},
@@ -959,6 +1027,12 @@ var CommonFlags = []cli.Flag{
 			"it defaults to 24 if unspecified.",
 		Destination: &cliConfig.Default.RawClusterSubnets,
 	},
+	&cli.StringFlag{
+		Name:        "transport",
+		Value:       Default.Transport,
+		Usage:       "Transport technology for the default network. When unset, the OVN default overlay transport is used. (no-overlay)",
+		Destination: &cliConfig.Default.Transport,
+	},
 	&cli.BoolFlag{
 		Name:        "unprivileged-mode",
 		Usage:       "Run ovnkube-node container in unprivileged mode. Valid only with --init-node option.",
@@ -966,7 +1040,7 @@ var CommonFlags = []cli.Flag{
 	},
 	&cli.BoolFlag{
 		Name:        "enable-multicast",
-		Usage:       "Adds multicast support. Valid only with --init-master option.",
+		Usage:       "Adds multicast support. Valid only with ovnkube-controller mode.",
 		Destination: &EnableMulticast,
 	},
 	// Logging options
@@ -1170,6 +1244,12 @@ var OVNK8sFeatureFlags = []cli.Flag{
 		Destination: &cliConfig.OVNKubernetesFeature.EnableRouteAdvertisements,
 		Value:       OVNKubernetesFeature.EnableRouteAdvertisements,
 	},
+	&cli.BoolFlag{
+		Name:        "enable-evpn",
+		Usage:       "Use EVPN feature with ovn-kubernetes. Requires route advertisements.",
+		Destination: &cliConfig.OVNKubernetesFeature.EnableEVPN,
+		Value:       OVNKubernetesFeature.EnableEVPN,
+	},
 	&cli.StringFlag{
 		Name:        "advertised-udn-isolation-mode",
 		Usage:       "Use pod isolation for BGP advertised UDN networks. Valid values are 'strict' or 'loose'.",
@@ -1183,10 +1263,10 @@ var OVNK8sFeatureFlags = []cli.Flag{
 		Value:       OVNKubernetesFeature.EnableStatelessNetPol,
 	},
 	&cli.BoolFlag{
-		Name:        "enable-interconnect",
-		Usage:       "Enable interconnecting multiple zones.",
-		Destination: &cliConfig.OVNKubernetesFeature.EnableInterconnect,
-		Value:       OVNKubernetesFeature.EnableInterconnect,
+		Name:        "allow-icmp-network-policy",
+		Usage:       "Allow ICMP/ICMPv6 traffic to bypass NetworkPolicy default-deny rules.",
+		Destination: &cliConfig.OVNKubernetesFeature.AllowICMPNetworkPolicy,
+		Value:       OVNKubernetesFeature.AllowICMPNetworkPolicy,
 	},
 	&cli.BoolFlag{
 		Name:        "enable-egress-service",
@@ -1229,6 +1309,19 @@ var OVNK8sFeatureFlags = []cli.Flag{
 		Usage:       "Use NetworkQoS CRD feature with ovn-kubernetes.",
 		Destination: &cliConfig.OVNKubernetesFeature.EnableNetworkQoS,
 		Value:       OVNKubernetesFeature.EnableNetworkQoS,
+	},
+	&cli.BoolFlag{
+		Name:        "enable-dynamic-udn-allocation",
+		Usage:       "Configure to use the dynamic UDN allocation feature with ovn-kubernetes.",
+		Destination: &cliConfig.OVNKubernetesFeature.EnableDynamicUDNAllocation,
+		Value:       OVNKubernetesFeature.EnableDynamicUDNAllocation,
+	},
+	&cli.DurationFlag{
+		Name: "udn-deletion-grace-period",
+		Usage: "Delay time in seconds that a node will wait before removing a UDN when the dynamic UDN allocation " +
+			"feature is used.",
+		Destination: &cliConfig.OVNKubernetesFeature.UDNDeletionGracePeriod,
+		Value:       OVNKubernetesFeature.UDNDeletionGracePeriod,
 	},
 }
 
@@ -1284,6 +1377,11 @@ var K8sFlags = []cli.Flag{
 		Name:        "k8s-cacert",
 		Usage:       "the absolute path to the Kubernetes API CA certificate (not required if --k8s-kubeconfig is given)",
 		Destination: &cliConfig.Kubernetes.CACert,
+	},
+	&cli.StringFlag{
+		Name:        "k8s-cacert-data",
+		Usage:       "the Base64 encoded Kubernetes API CA certificate data (not required if --k8s-kubeconfig is given)",
+		Destination: &cliConfig.Kubernetes.CACertData,
 	},
 	&cli.StringFlag{
 		Name:        "k8s-token",
@@ -1391,7 +1489,7 @@ var MetricsFlags = []cli.Flag{
 	},
 	&cli.BoolFlag{
 		Name:        "metrics-enable-config-duration",
-		Usage:       "Enables monitoring OVN-Kubernetes master and OVN configuration duration",
+		Usage:       "Enables monitoring OVN-Kubernetes ovnkube controller and OVN configuration duration",
 		Destination: &cliConfig.Metrics.EnableConfigDuration,
 	},
 	&cli.BoolFlag{
@@ -1401,45 +1499,34 @@ var MetricsFlags = []cli.Flag{
 	},
 }
 
-// OvnNBFlags capture OVN northbound database options
+// OvnNBFlags capture OVN northbound database options. The cert/key flags
+// below are no longer used for OVN DB connection (which is unix-socket only)
+// but their values are still consumed by the Egress IP gRPC health-check
+// channel via pkg/ovn/healthcheck/egressip_healthcheck.go reading
+// config.OvnNorth — see TODO on OvnAuthConfig.
 var OvnNBFlags = []cli.Flag{
 	&cli.StringFlag{
-		Name: "nb-address",
-		Usage: "IP address and port of the OVN northbound API " +
-			"(eg, ssl:1.2.3.4:6641,ssl:1.2.3.5:6642).  Leave empty to " +
-			"use a local unix socket.",
-		Destination: &cliConfig.OvnNorth.Address,
-	},
-	&cli.StringFlag{
-		Name: "nb-client-privkey",
-		Usage: "Private key that the client should use for talking to the OVN database (default when ssl address is used: /etc/openvswitch/ovnnb-privkey.pem).  " +
-			"Default value for this setting is empty which defaults to use local unix socket.",
+		Name:        "nb-client-privkey",
+		Usage:       "Private key used by node↔node Egress IP gRPC health-check channel (historical name).",
 		Destination: &cliConfig.OvnNorth.PrivKey,
 	},
 	&cli.StringFlag{
-		Name: "nb-client-cert",
-		Usage: "Client certificate that the client should use for talking to the OVN database (default when ssl address is used: /etc/openvswitch/ovnnb-cert.pem). " +
-			"Default value for this setting is empty which defaults to use local unix socket.",
+		Name:        "nb-client-cert",
+		Usage:       "Client certificate used by node↔node Egress IP gRPC health-check channel (historical name).",
 		Destination: &cliConfig.OvnNorth.Cert,
 	},
 	&cli.StringFlag{
-		Name: "nb-client-cacert",
-		Usage: "CA certificate that the client should use for talking to the OVN database (default when ssl address is used: /etc/openvswitch/ovnnb-ca.cert)." +
-			"Default value for this setting is empty which defaults to use local unix socket.",
+		Name:        "nb-client-cacert",
+		Usage:       "CA certificate used by node↔node Egress IP gRPC health-check channel (historical name).",
 		Destination: &cliConfig.OvnNorth.CACert,
 	},
 	&cli.StringFlag{
 		Name: "nb-cert-common-name",
-		Usage: "Common Name of the certificate used for TLS server certificate verification. " +
-			"In cases where the certificate doesn't have any SAN Extensions, this parameter " +
-			"should match the DNS(hostname) of the server. In case the certificate has a " +
-			"SAN extension, this parameter should match one of the SAN fields.",
+		Usage: "Common Name of the certificate used for TLS server certificate verification by " +
+			"the Egress IP gRPC health-check channel. In cases where the certificate doesn't have " +
+			"any SAN Extensions, this parameter should match the DNS(hostname) of the server. In " +
+			"case the certificate has a SAN extension, this parameter should match one of the SAN fields.",
 		Destination: &cliConfig.OvnNorth.CertCommonName,
-	},
-	&cli.UintFlag{
-		Name:        "nb-raft-election-timer",
-		Usage:       "The desired northbound database election timer.",
-		Destination: &cliConfig.OvnNorth.ElectionTimer,
 	},
 	&cli.StringFlag{
 		Name:        "nb-run-dir",
@@ -1457,44 +1544,6 @@ var OvnNBFlags = []cli.Flag{
 
 // OvnSBFlags capture OVN southbound database options
 var OvnSBFlags = []cli.Flag{
-	&cli.StringFlag{
-		Name: "sb-address",
-		Usage: "IP address and port of the OVN southbound API " +
-			"(eg, ssl:1.2.3.4:6642,ssl:1.2.3.5:6642).  " +
-			"Leave empty to use a local unix socket.",
-		Destination: &cliConfig.OvnSouth.Address,
-	},
-	&cli.StringFlag{
-		Name: "sb-client-privkey",
-		Usage: "Private key that the client should use for talking to the OVN database (default when ssl address is used: /etc/openvswitch/ovnsb-privkey.pem)." +
-			"Default value for this setting is empty which defaults to use local unix socket.",
-		Destination: &cliConfig.OvnSouth.PrivKey,
-	},
-	&cli.StringFlag{
-		Name: "sb-client-cert",
-		Usage: "Client certificate that the client should use for talking to the OVN database (default when ssl address is used: /etc/openvswitch/ovnsb-cert.pem).  " +
-			"Default value for this setting is empty which defaults to use local unix socket.",
-		Destination: &cliConfig.OvnSouth.Cert,
-	},
-	&cli.StringFlag{
-		Name: "sb-client-cacert",
-		Usage: "CA certificate that the client should use for talking to the OVN database (default when ssl address is used /etc/openvswitch/ovnsb-ca.cert). " +
-			"Default value for this setting is empty which defaults to use local unix socket.",
-		Destination: &cliConfig.OvnSouth.CACert,
-	},
-	&cli.StringFlag{
-		Name: "sb-cert-common-name",
-		Usage: "Common Name of the certificate used for TLS server certificate verification. " +
-			"In cases where the certificate doesn't have any SAN Extensions, this parameter " +
-			"should match the DNS(hostname) of the server. In case the certificate has a " +
-			"SAN extension, this parameter should match one of the SAN fields.",
-		Destination: &cliConfig.OvnSouth.CertCommonName,
-	},
-	&cli.UintFlag{
-		Name:        "sb-raft-election-timer",
-		Usage:       "The desired southbound database election timer.",
-		Destination: &cliConfig.OvnSouth.ElectionTimer,
-	},
 	&cli.StringFlag{
 		Name:        "sb-run-dir",
 		Usage:       "OVN southbound run directory path",
@@ -1530,6 +1579,13 @@ var OVNGatewayFlags = []cli.Flag{
 			"This is typically a VF or SF device. When specified it would be used as the in_port for Openflow rules " +
 			"on the external bridge. The Host IP would be on this device.",
 		Destination: &cliConfig.Gateway.GatewayAcceleratedInterface,
+	},
+	&cli.StringFlag{
+		Name: "dpu-host-gateway-representor-interface",
+		Usage: "The DPU-side representor interface for the host's uplink (PF). For some DPUs this is discovered " +
+			"automatically via phys_port_name via switchdev metadata. In simulated environments or other interpretations of " +
+			"DPUs, it must be specified explicitly because the interface has no switchdev metadata.",
+		Destination: &cliConfig.Gateway.DPUHostGatewayRepresentorInterface,
 	},
 	&cli.StringFlag{
 		Name: "exgw-interface",
@@ -1636,28 +1692,6 @@ var OVNGatewayFlags = []cli.Flag{
 	},
 }
 
-// MasterHAFlags capture leader election flags for master
-var MasterHAFlags = []cli.Flag{
-	&cli.IntFlag{
-		Name:        "ha-election-lease-duration",
-		Usage:       "Leader election lease duration (in secs)",
-		Destination: &cliConfig.MasterHA.ElectionLeaseDuration,
-		Value:       MasterHA.ElectionLeaseDuration,
-	},
-	&cli.IntFlag{
-		Name:        "ha-election-renew-deadline",
-		Usage:       "Leader election renew deadline (in secs)",
-		Destination: &cliConfig.MasterHA.ElectionRenewDeadline,
-		Value:       MasterHA.ElectionRenewDeadline,
-	},
-	&cli.IntFlag{
-		Name:        "ha-election-retry-period",
-		Usage:       "Leader election retry period (in secs)",
-		Destination: &cliConfig.MasterHA.ElectionRetryPeriod,
-		Value:       MasterHA.ElectionRetryPeriod,
-	},
-}
-
 // ClusterMgrHAFlags capture leader election flags for cluster manager
 var ClusterMgrHAFlags = []cli.Flag{
 	&cli.IntFlag{
@@ -1729,6 +1763,24 @@ var OvnKubeNodeFlags = []cli.Flag{
 		Value:       OvnKubeNode.MgmtPortDPResourceName,
 		Destination: &cliConfig.OvnKubeNode.MgmtPortDPResourceName,
 	},
+	&cli.IntFlag{
+		Name:        "dpu-node-lease-renew-interval",
+		Usage:       "Interval in seconds at which the DPU updates its custom node lease. Set to 0 to disable DPU health checking",
+		Value:       OvnKubeNode.DPUNodeLeaseRenewInterval,
+		Destination: &cliConfig.OvnKubeNode.DPUNodeLeaseRenewInterval,
+	},
+	&cli.IntFlag{
+		Name:        "dpu-node-lease-duration",
+		Usage:       "Lease duration in seconds before the DPU is considered unhealthy",
+		Value:       OvnKubeNode.DPUNodeLeaseDuration,
+		Destination: &cliConfig.OvnKubeNode.DPUNodeLeaseDuration,
+	},
+	&cli.BoolFlag{
+		Name:        "simulate-dpu",
+		Usage:       "Use simulated DPU operations instead of real SR-IOV/switchdev hardware. Required for Kind and VM-based DPU simulation environments.",
+		Value:       OvnKubeNode.SimulateDPU,
+		Destination: &cliConfig.OvnKubeNode.SimulateDPU,
+	},
 }
 
 // ClusterManagerFlags captures ovnkube-cluster-manager specific configurations
@@ -1772,7 +1824,6 @@ func GetFlags(customFlags []cli.Flag) []cli.Flag {
 	flags = append(flags, OvnNBFlags...)
 	flags = append(flags, OvnSBFlags...)
 	flags = append(flags, OVNGatewayFlags...)
-	flags = append(flags, MasterHAFlags...)
 	flags = append(flags, ClusterMgrHAFlags...)
 	flags = append(flags, HybridOverlayFlags...)
 	flags = append(flags, MonitoringFlags...)
@@ -1788,11 +1839,10 @@ func GetFlags(customFlags []cli.Flag) []cli.Flag {
 // ovs-vsctl and used as default values if option is not found via the config
 // file or command-line
 type Defaults struct {
-	OvnNorthAddress bool
-	K8sAPIServer    bool
-	K8sToken        bool
-	K8sTokenFile    bool
-	K8sCert         bool
+	K8sAPIServer bool
+	K8sToken     bool
+	K8sTokenFile bool
+	K8sCert      bool
 }
 
 const (
@@ -1851,8 +1901,46 @@ func setOVSExternalID(exec kexec.Interface, key, value string) error {
 	return nil
 }
 
+// reconcileKubernetesAuthFields ensures that if a config stage provides Token/TokenFile
+// or CACert/CACertData, stale value for any of these set by previous stage is cleared.
+// This is required since any combination of these fields could be set by any stage
+// and might get overwritten only partially.
+func reconcileKubernetesAuthFields(k *KubernetesConfig, override *KubernetesConfig) {
+	// If this stage provided either Token or TokenFile, clear the other field
+	// not provided by this stage.
+	overrideHasToken := override.Token != ""
+	overrideHasTokenFile := override.TokenFile != ""
+
+	if overrideHasToken || overrideHasTokenFile {
+		if !overrideHasToken {
+			k.Token = ""
+		}
+		if !overrideHasTokenFile {
+			k.TokenFile = ""
+		}
+	}
+
+	// If this stage provided either CACert or CACertData, clear the other field
+	// not provided by this stage.
+	overrideHasCACert := override.CACert != ""
+	overrideHasCACertData := override.CACertData != ""
+
+	if overrideHasCACert || overrideHasCACertData {
+		if !overrideHasCACert {
+			k.CACert = ""
+		}
+		if !overrideHasCACertData {
+			k.CACertData = ""
+		}
+	}
+}
+
 func buildKubernetesConfig(exec kexec.Interface, cli, file *config, saPath string, defaults *Defaults) error {
-	// token adn ca.crt may be from files mounted in container.
+	// values for token, cacert, kubeconfig, api-server may be found in several places.
+	// Priority order (highest first): OVS config, command line options, config file,
+	// environment variables, service account files
+
+	// token and ca.crt may be from files mounted in container.
 	saConfig := savedKubernetes
 	if data, err := os.ReadFile(filepath.Join(saPath, kubeServiceAccountFileToken)); err == nil {
 		saConfig.Token = string(data)
@@ -1866,16 +1954,13 @@ func buildKubernetesConfig(exec kexec.Interface, cli, file *config, saPath strin
 		return err
 	}
 
-	// values for token, cacert, kubeconfig, api-server may be found in several places.
-	// Priority order (highest first): OVS config, command line options, config file,
-	// environment variables, service account files
-
 	envConfig := savedKubernetes
 	envVarsMap := map[string]string{
 		"Kubeconfig":           "KUBECONFIG",
 		"BootstrapKubeconfig":  "BOOTSTRAP_KUBECONFIG",
 		"CertDir":              "CERT_DIR",
 		"CACert":               "K8S_CACERT",
+		"CACertData":           "K8S_CACERT_DATA",
 		"APIServer":            "K8S_APISERVER",
 		"Token":                "K8S_TOKEN",
 		"TokenFile":            "K8S_TOKEN_FILE",
@@ -1890,16 +1975,19 @@ func buildKubernetesConfig(exec kexec.Interface, cli, file *config, saPath strin
 	if err := overrideFields(&Kubernetes, &envConfig, &savedKubernetes); err != nil {
 		return err
 	}
+	reconcileKubernetesAuthFields(&Kubernetes, &envConfig)
 
 	// Copy config file values over default values
 	if err := overrideFields(&Kubernetes, &file.Kubernetes, &savedKubernetes); err != nil {
 		return err
 	}
+	reconcileKubernetesAuthFields(&Kubernetes, &file.Kubernetes)
 
 	// And CLI overrides over config file and default values
 	if err := overrideFields(&Kubernetes, &cli.Kubernetes, &savedKubernetes); err != nil {
 		return err
 	}
+	reconcileKubernetesAuthFields(&Kubernetes, &cli.Kubernetes)
 
 	// Grab default values from OVS external IDs
 	if defaults.K8sAPIServer {
@@ -1920,8 +2008,15 @@ func buildKubernetesConfig(exec kexec.Interface, cli, file *config, saPath strin
 		return fmt.Errorf("kubernetes kubeconfig file %q not found", Kubernetes.Kubeconfig)
 	}
 
-	if Kubernetes.CACert != "" {
-		bytes, err := os.ReadFile(Kubernetes.CACert)
+	if Kubernetes.CACert != "" || Kubernetes.CACertData != "" {
+		var bytes []byte
+		var err error
+		if Kubernetes.CACert != "" {
+			bytes, err = os.ReadFile(Kubernetes.CACert)
+		} else {
+			bytes, err = base64.StdEncoding.DecodeString(Kubernetes.CACertData)
+		}
+
 		if err != nil {
 			return err
 		}
@@ -2122,30 +2217,11 @@ func buildOVNKubernetesFeatureConfig(cli, file *config) error {
 		return fmt.Errorf("invalid advertised-udn-isolation-mode %q: expect one of %s or %s",
 			OVNKubernetesFeature.AdvertisedUDNIsolationMode, AdvertisedUDNIsolationModeStrict, AdvertisedUDNIsolationModeLoose)
 	}
-	return nil
-}
-
-func buildMasterHAConfig(cli, file *config) error {
-	// Copy config file values over default values
-	if err := overrideFields(&MasterHA, &file.MasterHA, &savedMasterHA); err != nil {
-		return err
+	if OVNKubernetesFeature.EnableEVPN && !OVNKubernetesFeature.EnableRouteAdvertisements {
+		return fmt.Errorf("invalid feature configuration: EVPN requires route advertisements but route advertisements are disabled")
 	}
-
-	// And CLI overrides over config file and default values
-	if err := overrideFields(&MasterHA, &cli.MasterHA, &savedMasterHA); err != nil {
-		return err
-	}
-
-	if MasterHA.ElectionLeaseDuration <= MasterHA.ElectionRenewDeadline {
-		return fmt.Errorf("invalid HA election lease duration '%d'. "+
-			"It should be greater than HA election renew deadline '%d'",
-			MasterHA.ElectionLeaseDuration, MasterHA.ElectionRenewDeadline)
-	}
-
-	if MasterHA.ElectionRenewDeadline <= MasterHA.ElectionRetryPeriod {
-		return fmt.Errorf("invalid HA election renew deadline duration '%d'. "+
-			"It should be greater than HA election retry period '%d'",
-			MasterHA.ElectionRenewDeadline, MasterHA.ElectionRetryPeriod)
+	if OVNKubernetesFeature.EnableDynamicUDNAllocation && !OVNKubernetesFeature.EnableNetworkSegmentation {
+		return fmt.Errorf("the Dynamic UDN Allocation feature cannot be enabled without also enabling Network Segmentation")
 	}
 	return nil
 }
@@ -2269,6 +2345,118 @@ func buildClusterManagerConfig(cli, file *config) error {
 	return nil
 }
 
+// buildNoOverlayConfig updates NoOverlay config from config file only
+// NoOverlay configuration is only available in config file, not via CLI flags
+func buildNoOverlayConfig(file *config) error {
+	// Copy config file values over default values
+	if err := overrideFields(&NoOverlay, &file.NoOverlay, &savedNoOverlay); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateNoOverlayConfig validates the no-overlay configuration
+func validateNoOverlayConfig() error {
+	// Validate transport option; empty string means default OVN overlay transport
+	if Default.Transport != "" && Default.Transport != types.NetworkTransportNoOverlay {
+		return fmt.Errorf("invalid transport %q: must be empty (default OVN overlay) or %q", Default.Transport, types.NetworkTransportNoOverlay)
+	}
+
+	// If transport is no-overlay, validate required no-overlay options
+	if Default.Transport == types.NetworkTransportNoOverlay {
+		if !OVNKubernetesFeature.EnableRouteAdvertisements {
+			return fmt.Errorf("enable-route-advertisements must be true when transport=%q", types.NetworkTransportNoOverlay)
+		}
+		if NoOverlay.OutboundSNAT == "" {
+			return fmt.Errorf("outbound-snat is required when transport=no-overlay")
+		}
+		if NoOverlay.OutboundSNAT != types.NoOverlaySNATEnabled && NoOverlay.OutboundSNAT != types.NoOverlaySNATDisabled {
+			return fmt.Errorf("invalid outbound-snat %q: must be %q or %q", NoOverlay.OutboundSNAT, types.NoOverlaySNATEnabled, types.NoOverlaySNATDisabled)
+		}
+
+		if NoOverlay.Routing == "" {
+			return fmt.Errorf("routing is required when transport=no-overlay")
+		}
+		if NoOverlay.Routing != NoOverlayRoutingManaged && NoOverlay.Routing != NoOverlayRoutingUnmanaged {
+			return fmt.Errorf("invalid routing %q: must be %q or %q", NoOverlay.Routing, NoOverlayRoutingManaged, NoOverlayRoutingUnmanaged)
+		}
+
+		// If routing is managed, topology is required
+		if NoOverlay.Routing == NoOverlayRoutingManaged {
+			if ManagedBGP.Topology == "" {
+				return fmt.Errorf("topology is required when routing=managed")
+			}
+			if ManagedBGP.Topology != ManagedBGPTopologyFullMesh {
+				return fmt.Errorf("invalid topology %q: must be %q", ManagedBGP.Topology, ManagedBGPTopologyFullMesh)
+			}
+			if errs := validation.ValidateNamespaceName(ManagedBGP.FRRNamespace, false); len(errs) != 0 {
+				return fmt.Errorf("invalid frr-namespace %q: %s", ManagedBGP.FRRNamespace, strings.Join(errs, ", "))
+			}
+		}
+	} else {
+		// Warn if no-overlay or BGP config is specified but transport is not no-overlay
+		if NoOverlay.OutboundSNAT != "" || NoOverlay.Routing != "" {
+			klog.Warningf("[no-overlay] configuration specified but transport is %q; configuration will be ignored", Default.Transport)
+		}
+	}
+
+	return nil
+}
+
+// validateConfig performs all configuration validations after configs are built and completed.
+// This is the centralized place called after completeConfig() that orchestrates all validations.
+func validateConfig() error {
+	// Validate managed BGP configuration
+	if err := validateManagedBGPConfig(); err != nil {
+		return err
+	}
+
+	// Validate no-overlay/transport configuration
+	if err := validateNoOverlayConfig(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// buildManagedBGPConfig updates managed BGP config from config file only
+// ManagedBGP configuration is only available in config file, not via CLI flags
+func buildManagedBGPConfig(file *config) error {
+	// Copy config file values over default values
+	if err := overrideFields(&ManagedBGP, &file.ManagedBGP, &savedManagedBGP); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateManagedBGPConfig validates the managed BGP configuration
+func validateManagedBGPConfig() error {
+	// Validate AS number is in valid range
+	// Valid AS numbers: 1-4294967295 (32-bit)
+	// Reserved ranges:
+	//   0                    - Reserved (RFC 7607)
+	//   23456                - AS_TRANS (RFC 6793)
+	//   65535                - Reserved (RFC 7300)
+	//   4294967295           - Reserved (RFC 7300)
+
+	if ManagedBGP.ASNumber == 0 {
+		return fmt.Errorf("invalid as-number: 0 is reserved")
+	}
+	if ManagedBGP.ASNumber == 23456 {
+		return fmt.Errorf("invalid as-number: 23456 is reserved (AS_TRANS for 16-bit to 32-bit AS translation)")
+	}
+	if ManagedBGP.ASNumber == 65535 {
+		return fmt.Errorf("invalid as-number: 65535 is reserved")
+	}
+	if ManagedBGP.ASNumber == 4294967295 {
+		return fmt.Errorf("invalid as-number: 4294967295 is reserved")
+	}
+
+	return nil
+}
+
 // completeClusterManagerConfig completes the ClusterManager config by parsing raw values
 // into their final form.
 func completeClusterManagerConfig(allSubnets *ConfigSubnets) error {
@@ -2321,6 +2509,7 @@ func buildDefaultConfig(cli, file *config) error {
 	if Default.Zone == "" {
 		Default.Zone = types.OvnDefaultZone
 	}
+
 	return nil
 }
 
@@ -2401,6 +2590,7 @@ func stripTokenFromK8sConfig() KubernetesConfig {
 	// Token and CAData are sensitive fields so stripping
 	// them while logging.
 	k8sConf.Token = ""
+	k8sConf.CACertData = ""
 	k8sConf.CAData = []byte{}
 	return k8sConf
 }
@@ -2425,12 +2615,13 @@ func initConfigWithPath(ctx *cli.Context, exec kexec.Interface, saPath string, d
 		OvnNorth:             savedOvnNorth,
 		OvnSouth:             savedOvnSouth,
 		Gateway:              savedGateway,
-		MasterHA:             savedMasterHA,
 		ClusterMgrHA:         savedClusterMgrHA,
 		HybridOverlay:        savedHybridOverlay,
 		OvnKubeNode:          savedOvnKubeNode,
 		ClusterManager:       savedClusterManager,
 		OvsPaths:             savedOvsPaths,
+		NoOverlay:            savedNoOverlay,
+		ManagedBGP:           savedManagedBGP,
 	}
 
 	configFile, configFileIsDefault = getConfigFilePath(ctx)
@@ -2524,10 +2715,6 @@ func initConfigWithPath(ctx *cli.Context, exec kexec.Interface, saPath string, d
 		return "", err
 	}
 
-	if err = buildMasterHAConfig(&cliConfig, &cfg); err != nil {
-		return "", err
-	}
-
 	if err = buildClusterMgrHAConfig(&cliConfig, &cfg); err != nil {
 		return "", err
 	}
@@ -2556,13 +2743,21 @@ func initConfigWithPath(ctx *cli.Context, exec kexec.Interface, saPath string, d
 		return "", err
 	}
 
-	tmpAuth, err := buildOvnAuth(exec, true, &cliConfig.OvnNorth, &cfg.OvnNorth, defaults.OvnNorthAddress)
+	if err = buildNoOverlayConfig(&cfg); err != nil {
+		return "", err
+	}
+
+	if err = buildManagedBGPConfig(&cfg); err != nil {
+		return "", err
+	}
+
+	tmpAuth, err := buildOvnAuth(exec, true, &cliConfig.OvnNorth, &cfg.OvnNorth)
 	if err != nil {
 		return "", err
 	}
 	OvnNorth = *tmpAuth
 
-	tmpAuth, err = buildOvnAuth(exec, false, &cliConfig.OvnSouth, &cfg.OvnSouth, false)
+	tmpAuth, err = buildOvnAuth(exec, false, &cliConfig.OvnSouth, &cfg.OvnSouth)
 	if err != nil {
 		return "", err
 	}
@@ -2572,6 +2767,12 @@ func initConfigWithPath(ctx *cli.Context, exec kexec.Interface, saPath string, d
 		return "", err
 	}
 
+	// Perform cross-configuration validations
+	if err := validateConfig(); err != nil {
+		return "", err
+	}
+
+	klog.V(5).Infof("Features config: %+v", OVNKubernetesFeature)
 	klog.V(5).Infof("Default config: %+v", Default)
 	klog.V(5).Infof("Logging config: %+v", Logging)
 	klog.V(5).Infof("Monitoring config: %+v", Monitoring)
@@ -2585,6 +2786,8 @@ func initConfigWithPath(ctx *cli.Context, exec kexec.Interface, saPath string, d
 	klog.V(5).Infof("Ovnkube Node config: %+v", OvnKubeNode)
 	klog.V(5).Infof("Ovnkube Cluster Manager config: %+v", ClusterManager)
 	klog.V(5).Infof("OVS Paths config: %+v", OvsPaths)
+	klog.V(5).Infof("No Overlay config: %+v", NoOverlay)
+	klog.V(5).Infof("Managed BGP config: %+v", ManagedBGP)
 
 	return retConfigFile, nil
 }
@@ -2634,72 +2837,13 @@ func pathExists(path string) bool {
 	return true
 }
 
-// parseAddress parses an OVN database address, which can be of form
-// "ssl:1.2.3.4:6641,ssl:1.2.3.5:6641" (OVS/OVN format) or
-// "ssl://1.2.3.4:6641,ssl://1.2.3.5:6641" (legacy ovnkube format)
-// or "ssl:[fd01::1]:6641,ssl:[fd01::2]:6641
-// and returns the validated address(es) and the scheme
-func parseAddress(urlString string) (string, OvnDBScheme, error) {
-	var parsedAddress, scheme string
-	var parsedScheme OvnDBScheme
-
-	urlString = strings.Replace(urlString, "//", "", -1)
-	for _, ovnAddress := range strings.Split(urlString, ",") {
-		splits := strings.SplitN(ovnAddress, ":", 2)
-		if len(splits) != 2 {
-			return "", "", fmt.Errorf("failed to parse OVN address %s", urlString)
-		}
-
-		if scheme == "" {
-			scheme = splits[0]
-		} else if scheme != splits[0] {
-			return "", "", fmt.Errorf("invalid protocols in OVN address %s",
-				urlString)
-		}
-
-		if scheme == "unix" {
-			if parsedAddress != "" {
-				parsedAddress += ","
-			}
-			parsedAddress += ovnAddress
-		} else {
-			host, port, err := net.SplitHostPort(splits[1])
-			if err != nil {
-				return "", "", fmt.Errorf("failed to parse OVN DB host/port %q: %v",
-					splits[1], err)
-			}
-
-			if parsedAddress != "" {
-				parsedAddress += ","
-			}
-			parsedAddress += fmt.Sprintf("%s:%s", scheme, net.JoinHostPort(host, port))
-		}
-	}
-
-	switch {
-	case scheme == "ssl":
-		parsedScheme = OvnDBSchemeSSL
-	case scheme == "tcp":
-		parsedScheme = OvnDBSchemeTCP
-	case scheme == "unix":
-		parsedScheme = OvnDBSchemeUnix
-	default:
-		return "", "", fmt.Errorf("unknown OVN DB scheme %q", scheme)
-	}
-	return parsedAddress, parsedScheme, nil
-}
-
-// buildOvnAuth returns an OvnAuthConfig object describing the connection to an
-// OVN database, given a connection description string and authentication
-// details
-func buildOvnAuth(exec kexec.Interface, northbound bool, cliAuth, confAuth *OvnAuthConfig, readAddress bool) (*OvnAuthConfig, error) {
-	var direction string
+// buildOvnAuth returns an OvnAuthConfig describing how to connect to a local
+// OVN database via unix socket.
+func buildOvnAuth(exec kexec.Interface, northbound bool, cliAuth, confAuth *OvnAuthConfig) (*OvnAuthConfig, error) {
 	var defaultAuth *OvnAuthConfig
 	if northbound {
-		direction = "nb"
 		defaultAuth = &savedOvnNorth
 	} else {
-		direction = "sb"
 		defaultAuth = &savedOvnSouth
 	}
 
@@ -2710,22 +2854,8 @@ func buildOvnAuth(exec kexec.Interface, northbound bool, cliAuth, confAuth *OvnA
 		DbLocation: defaultAuth.DbLocation,
 	}
 
-	// Determine final address so we know how to set cert/key defaults
-	address := cliAuth.Address
-	if address == "" {
-		address = confAuth.Address
-	}
-	if address == "" && readAddress {
-		address = getOVSExternalID(exec, "ovn-"+direction)
-	}
-	if strings.HasPrefix(address, "ssl") {
-		// Set up default SSL cert/key paths
-		auth.CACert = "/etc/openvswitch/ovn" + direction + "-ca.cert"
-		auth.PrivKey = "/etc/openvswitch/ovn" + direction + "-privkey.pem"
-		auth.Cert = "/etc/openvswitch/ovn" + direction + "-cert.pem"
-	}
-
-	// Build the final auth config with overrides from CLI and config file
+	// Apply config-file then CLI overrides for RunDir / DbLocation
+	// and the Egress IP gRPC cert/key fields (see TODO on OvnAuthConfig).
 	if err := overrideFields(auth, confAuth, defaultAuth); err != nil {
 		return nil, err
 	}
@@ -2733,132 +2863,27 @@ func buildOvnAuth(exec kexec.Interface, northbound bool, cliAuth, confAuth *OvnA
 		return nil, err
 	}
 
-	if address == "" {
-		if auth.PrivKey != "" || auth.Cert != "" || auth.CACert != "" {
-			return nil, fmt.Errorf("certificate or key given; perhaps you mean to use the 'ssl' scheme?")
-		}
-		auth.Scheme = OvnDBSchemeUnix
-		auth.Address = fmt.Sprintf("unix:%s", filepath.Join(auth.RunDir, fmt.Sprintf("ovn%s_db.sock", direction)))
-		return auth, nil
-	}
-
-	var err error
-	auth.Address, auth.Scheme, err = parseAddress(address)
-	if err != nil {
-		return nil, err
-	}
-
-	switch {
-	case auth.Scheme == OvnDBSchemeSSL:
-		if auth.PrivKey == "" || auth.Cert == "" || auth.CACert == "" || auth.CertCommonName == "" {
-			return nil, fmt.Errorf("must specify private key, certificate, CA certificate, and common name used in the certificate for 'ssl' scheme")
-		}
-	case auth.Scheme == OvnDBSchemeTCP:
-		if auth.PrivKey != "" || auth.Cert != "" || auth.CACert != "" {
-			return nil, fmt.Errorf("certificate or key given; perhaps you mean to use the 'ssl' scheme?")
-		}
-	case auth.Scheme == OvnDBSchemeUnix:
-		if auth.PrivKey != "" || auth.Cert != "" || auth.CACert != "" {
-			return nil, fmt.Errorf("certificate or key given; perhaps you mean to use the 'ssl' scheme?")
-		}
-	}
-
 	return auth, nil
 }
 
-func (a *OvnAuthConfig) ensureCACert() error {
-	if pathExists(a.CACert) {
-		// CA file exists, nothing to do
+// GetURL returns the local unix-socket URL of the OVN northbound or southbound
+// database, derived from RunDir.
+func (a *OvnAuthConfig) GetURL() string {
+	direction := "sb"
+	if a.northbound {
+		direction = "nb"
+	}
+	return fmt.Sprintf("unix:%s", filepath.Join(a.RunDir, fmt.Sprintf("ovn%s_db.sock", direction)))
+}
+
+// SetDBAuth tells ovn-controller where to find the local SB database via the
+// "ovn-remote" external id. For the northbound database it is a no-op since
+// no equivalent indirection is needed.
+func (a *OvnAuthConfig) SetDBAuth() error {
+	if a.northbound {
 		return nil
 	}
-
-	// Client can bootstrap the CA from the OVN API.  Use nbctl for both
-	// SB and NB since ovn-sbctl only supports --bootstrap-ca-cert from
-	// 2.9.90+.
-	// FIXME: change back to a.ctlCmd when sbctl supports --bootstrap-ca-cert
-	// https://github.com/openvswitch/ovs/pull/226
-	args := []string{
-		"--db=" + a.GetURL(),
-		"--timeout=5",
-	}
-	if a.Scheme == OvnDBSchemeSSL {
-		args = append(args, "--private-key="+a.PrivKey)
-		args = append(args, "--certificate="+a.Cert)
-		args = append(args, "--bootstrap-ca-cert="+a.CACert)
-	}
-	args = append(args, "list", "nb_global")
-	_, _ = rawExec(a.exec, "ovn-nbctl", args...)
-	if _, err := os.Stat(a.CACert); os.IsNotExist(err) {
-		klog.Warningf("Bootstrapping %s CA certificate failed", a.CACert)
-	}
-	return nil
-}
-
-// GetURL returns a URL suitable for passing to ovn-northd which describes the
-// transport mechanism for connection to the database
-func (a *OvnAuthConfig) GetURL() string {
-	return a.Address
-}
-
-// SetDBAuth sets the authentication configuration and connection method
-// for the OVN northbound or southbound database server or client
-func (a *OvnAuthConfig) SetDBAuth() error {
-	if a.Scheme == OvnDBSchemeSSL {
-		// Both server and client SSL schemes require privkey and cert
-		if !pathExists(a.PrivKey) {
-			return fmt.Errorf("private key file %s not found", a.PrivKey)
-		}
-		if !pathExists(a.Cert) {
-			return fmt.Errorf("certificate file %s not found", a.Cert)
-		}
-
-		// Client can bootstrap the CA cert from the DB
-		if err := a.ensureCACert(); err != nil {
-			return err
-		}
-
-		// Tell Southbound DB clients (like ovn-controller)
-		// which certificates to use to talk to the DB.
-		// Must happen *before* setting the "ovn-remote"
-		// external-id.
-		if !a.northbound {
-			out, err := runOVSVsctl(a.exec, "del-ssl")
-			if err != nil {
-				return fmt.Errorf("error deleting ovs-vsctl SSL "+
-					"configuration: %q (%v)", out, err)
-			}
-
-			out, err = runOVSVsctl(a.exec, "set-ssl", a.PrivKey, a.Cert, a.CACert)
-			if err != nil {
-				return fmt.Errorf("error setting client southbound DB SSL options: %v\n  %q", err, out)
-			}
-		}
-	}
-
-	if !a.northbound {
-		// store the Southbound Database address in an external id - "external_ids:ovn-remote"
-		if err := setOVSExternalID(a.exec, "ovn-remote", "\""+a.GetURL()+"\""); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (a *OvnAuthConfig) updateIP(newIPs []string, port string) {
-	newAddresses := make([]string, 0, len(newIPs))
-	for _, ipAddress := range newIPs {
-		newAddresses = append(newAddresses, fmt.Sprintf("%v:%s", a.Scheme, net.JoinHostPort(ipAddress, port)))
-	}
-	a.Address = strings.Join(newAddresses, ",")
-}
-
-// UpdateOVNNodeAuth updates the host and URL in ClientAuth
-// for both OvnNorth and OvnSouth. It updates them with the new masterIP.
-func UpdateOVNNodeAuth(masterIP []string, southboundDBPort, northboundDBPort string) {
-	klog.V(5).Infof("Update OVN node auth with new master ip: %s", masterIP)
-	OvnNorth.updateIP(masterIP, northboundDBPort)
-	OvnSouth.updateIP(masterIP, southboundDBPort)
+	return setOVSExternalID(a.exec, "ovn-remote", "\""+a.GetURL()+"\"")
 }
 
 // ovnKubeNodeModeSupported validates the provided mode is supported by ovnkube node
@@ -2875,6 +2900,18 @@ func ovnKubeNodeModeSupported(mode string) error {
 		return fmt.Errorf("unexpected ovnkube-node-mode: %s. supported modes: %v", mode, supportedModes)
 	}
 	return nil
+}
+
+func IsModeFull() bool {
+	return OvnKubeNode.Mode == types.NodeModeFull
+}
+
+func IsModeDPU() bool {
+	return OvnKubeNode.Mode == types.NodeModeDPU
+}
+
+func IsModeDPUHost() bool {
+	return OvnKubeNode.Mode == types.NodeModeDPUHost
 }
 
 // buildOvnKubeNodeConfig updates OvnKubeNode config from cli and config file
@@ -2895,8 +2932,19 @@ func buildOvnKubeNodeConfig(cli, file *config) error {
 	}
 
 	// ovnkube-node-mode dpu/dpu-host does not support hybrid overlay
-	if OvnKubeNode.Mode != types.NodeModeFull && HybridOverlay.Enabled {
+	if (IsModeDPU() || IsModeDPUHost()) && HybridOverlay.Enabled {
 		return fmt.Errorf("hybrid overlay is not supported with ovnkube-node mode %s", OvnKubeNode.Mode)
+	}
+
+	if OvnKubeNode.DPUNodeLeaseRenewInterval < 0 {
+		return fmt.Errorf("invalid dpu-node-lease-renew-interval '%d'. must be >= 0", OvnKubeNode.DPUNodeLeaseRenewInterval)
+	}
+	if OvnKubeNode.DPUNodeLeaseDuration <= 0 {
+		return fmt.Errorf("invalid dpu-node-lease-duration '%d'. must be > 0", OvnKubeNode.DPUNodeLeaseDuration)
+	}
+	if OvnKubeNode.DPUNodeLeaseDuration <= OvnKubeNode.DPUNodeLeaseRenewInterval {
+		return fmt.Errorf("invalid dpu-node-lease-duration '%d'. must be > dpu-node-lease-renew-interval '%d'",
+			OvnKubeNode.DPUNodeLeaseDuration, OvnKubeNode.DPUNodeLeaseRenewInterval)
 	}
 
 	// Warn the user if both MgmtPortNetdev and MgmtPortDPResourceName are specified since they
@@ -2911,13 +2959,13 @@ func buildOvnKubeNodeConfig(cli, file *config) error {
 	// when DPU is used, management port is always backed by a representor. On the
 	// host side, it needs to be provided through --ovnkube-node-mgmt-port-netdev.
 	// On the DPU, it is derrived from the annotation exposed on the host side.
-	if OvnKubeNode.Mode == types.NodeModeDPU && !(OvnKubeNode.MgmtPortNetdev == "" && OvnKubeNode.MgmtPortDPResourceName == "") {
+	if IsModeDPU() && !(OvnKubeNode.MgmtPortNetdev == "" && OvnKubeNode.MgmtPortDPResourceName == "") {
 		return fmt.Errorf("ovnkube-node-mgmt-port-netdev or ovnkube-node-mgmt-port-dp-resource-name must not be provided")
 	}
-	if OvnKubeNode.Mode == types.NodeModeDPUHost && OvnKubeNode.MgmtPortNetdev == "" && OvnKubeNode.MgmtPortDPResourceName == "" {
+	if IsModeDPUHost() && OvnKubeNode.MgmtPortNetdev == "" && OvnKubeNode.MgmtPortDPResourceName == "" {
 		return fmt.Errorf("ovnkube-node-mgmt-port-netdev or ovnkube-node-mgmt-port-dp-resource-name must be provided")
 	}
-	if OVNKubernetesFeature.EnableNetworkSegmentation && OvnKubeNode.Mode == types.NodeModeDPUHost && OvnKubeNode.MgmtPortDPResourceName == "" {
+	if OVNKubernetesFeature.EnableNetworkSegmentation && IsModeDPUHost() && OvnKubeNode.MgmtPortDPResourceName == "" {
 		return fmt.Errorf("ovnkube-node-mgmt-port-dp-resource-name must be provided on dpu-host mode if network segmentation is enabled")
 	}
 	return nil

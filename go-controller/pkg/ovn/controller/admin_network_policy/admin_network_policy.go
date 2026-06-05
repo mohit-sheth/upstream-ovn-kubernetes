@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package adminnetworkpolicy
 
 import (
@@ -19,11 +22,11 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func (c *Controller) processNextANPWorkItem(wg *sync.WaitGroup) bool {
@@ -87,7 +90,7 @@ func (c *Controller) syncAdminNetworkPolicy(key string) error {
 	if err != nil {
 		// we can ignore the error if status update doesn't succeed; best effort
 		_ = c.updateANPStatusToNotReady(anp.Name, err.Error())
-		if !errors.Is(err, ErrorANPPriorityUnsupported) {
+		if errors.Is(err, ErrorANPPriorityUnsupported) {
 			// we don't want to retry for these specific errors since they
 			// need manual intervention from users to update their CRDs
 			return nil
@@ -354,7 +357,7 @@ func (c *Controller) expandRulePeers(rule *gressRule) error {
 				if util.PodWantsHostNetwork(pod) || util.PodCompleted(pod) || !util.PodScheduled(pod) {
 					continue
 				}
-				podIPs, err := util.GetPodIPsOfNetwork(pod, &util.DefaultNetInfo{})
+				podIPs, err := util.GetPodIPsOfNetwork(pod, &util.DefaultNetInfo{}, nil)
 				if err != nil {
 					if errors.Is(err, util.ErrNoPodIPFound) {
 						// we ignore podIPsNotFound error here because onANPPodUpdate
@@ -472,7 +475,7 @@ func (c *Controller) convertANPSubjectToLSPs(anp *adminNetworkPolicyState) ([]*n
 				continue
 			}
 			// we need to collect podIP:cPort information
-			podIPs, err := util.GetPodIPsOfNetwork(pod, &util.DefaultNetInfo{})
+			podIPs, err := util.GetPodIPsOfNetwork(pod, &util.DefaultNetInfo{}, nil)
 			if err != nil {
 				if errors.Is(err, util.ErrNoPodIPFound) {
 					// we ignore podIPsNotFound error here because onANPPodUpdate
@@ -515,7 +518,7 @@ func (c *Controller) convertANPSubjectToLSPs(anp *adminNetworkPolicyState) ([]*n
 // to the provided anp which got deleted.
 // uses externalIDs to figure out ownership
 func (c *Controller) clearAdminNetworkPolicy(anpName string) error {
-	// See if we need to handle this: https://github.com/ovn-org/ovn-kubernetes/pull/3659#discussion_r1284645817
+	// See if we need to handle this: https://github.com/ovn-kubernetes/ovn-kubernetes/pull/3659#discussion_r1284645817
 	anp, loaded := c.anpCache[anpName]
 	if !loaded {
 		// there is no existing ANP configured with this name, nothing to clean

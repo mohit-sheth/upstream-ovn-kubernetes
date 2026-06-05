@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package clustermanager
 
 import (
@@ -12,24 +15,30 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/dnsnameresolver"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/egressservice"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/endpointslicemirror"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/networkconnect"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/routeadvertisements"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/status_manager"
-	udncontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork"
-	udntemplate "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	networkconnectclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/dnsnameresolver"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/egressservice"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/endpointslicemirror"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/managedbgp"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/networkconnect"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/nooverlay"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/routeadvertisements"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/status_manager"
+	udncontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork"
+	udntemplate "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/userdefinednetwork/template"
+	vtepcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/vtep"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
+	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
+	rainformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/informers/externalversions/routeadvertisements/v1"
+	vtepinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/informers/externalversions/vtep/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/healthcheck"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // ClusterManager structure is the object which manages the cluster nodes.
@@ -38,6 +47,7 @@ import (
 type ClusterManager struct {
 	client                      clientset.Interface
 	defaultNetClusterController *networkClusterController
+	nodeController              *nodecontroller.NodeController
 	zoneClusterController       *zoneClusterController
 	wf                          *factory.WatchFactory
 	udnClusterManager           *userDefinedNetworkClusterManager
@@ -63,7 +73,10 @@ type ClusterManager struct {
 	// networkManager creates and deletes network controllers
 	networkManager networkmanager.Controller
 
-	raController *routeadvertisements.Controller
+	raController         *routeadvertisements.Controller
+	noOverlayController  *nooverlay.Controller
+	managedBGPController *managedbgp.Controller
+	vtepController       *vtepcontroller.Controller
 }
 
 // NewClusterManager creates a new cluster manager to manage the cluster nodes.
@@ -75,25 +88,18 @@ func NewClusterManager(
 ) (*ClusterManager, error) {
 
 	wf = wf.ShallowClone()
-	defaultNetClusterController := newDefaultNetworkClusterController(&util.DefaultNetInfo{}, ovnClient, wf, recorder)
-
-	zoneClusterController, err := newZoneClusterController(ovnClient, wf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create zone cluster controller, err : %w", err)
-	}
-
 	cm := &ClusterManager{
-		client:                      ovnClient.KubeClient,
-		defaultNetClusterController: defaultNetClusterController,
-		zoneClusterController:       zoneClusterController,
-		wf:                          wf,
-		recorder:                    recorder,
-		identity:                    identity,
-		statusManager:               status_manager.NewStatusManager(wf, ovnClient),
+		client:         ovnClient.KubeClient,
+		wf:             wf,
+		recorder:       recorder,
+		identity:       identity,
+		networkManager: networkmanager.Default(),
 	}
 
-	cm.networkManager = networkmanager.Default()
-	var tunnelKeysAllocator *id.TunnelKeysAllocator
+	var (
+		err                 error
+		tunnelKeysAllocator *id.TunnelKeysAllocator
+	)
 	if config.OVNKubernetesFeature.EnableMultiNetwork {
 		// tunnelKeysAllocator is now only used for NAD tunnel keys allocation, but will be reused
 		// for Connecting UDNs. So we initialize it here and pass it to the networkManager.
@@ -108,8 +114,21 @@ func NewClusterManager(
 		if err != nil {
 			return nil, err
 		}
+	}
+	cm.statusManager = status_manager.NewStatusManager(wf, ovnClient, cm.networkManager.Interface())
 
-		cm.udnClusterManager, err = newUserDefinedNetworkClusterManager(ovnClient, wf, cm.networkManager.Interface(), recorder)
+	nodeController := nodecontroller.NewController(wf, "clustermanager-node", cm.networkManager.Interface())
+	defaultNetClusterController := newDefaultNetworkClusterController(&util.DefaultNetInfo{}, ovnClient, wf, recorder, nodeController)
+	zoneClusterController, err := newZoneClusterController(ovnClient, wf)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create zone cluster controller, err : %w", err)
+	}
+	cm.defaultNetClusterController = defaultNetClusterController
+	cm.nodeController = nodeController
+	cm.zoneClusterController = zoneClusterController
+
+	if config.OVNKubernetesFeature.EnableMultiNetwork {
+		cm.udnClusterManager, err = newUserDefinedNetworkClusterManager(ovnClient, wf, cm.networkManager.Interface(), recorder, nodeController)
 		if err != nil {
 			return nil, err
 		}
@@ -160,6 +179,15 @@ func NewClusterManager(
 	}
 
 	if util.IsNetworkSegmentationSupportEnabled() {
+		var vtepInformer vtepinformer.VTEPInformer
+		if util.IsEVPNEnabled() {
+			vtepInformer = wf.VTEPInformer()
+		}
+		// RouteAdvertisements informer for no-overlay transport validation
+		var raInformer rainformer.RouteAdvertisementsInformer
+		if util.IsRouteAdvertisementsEnabled() {
+			raInformer = wf.RouteAdvertisementsInformer()
+		}
 		udnController := udncontroller.New(
 			ovnClient.NetworkAttchDefClient, wf.NADInformer(),
 			ovnClient.UserDefinedNetworkClient,
@@ -168,6 +196,8 @@ func NewClusterManager(
 			cm.networkManager.Interface(),
 			wf.PodCoreInformer(),
 			wf.NamespaceInformer(),
+			vtepInformer,
+			raInformer,
 			cm.recorder,
 		)
 		cm.userDefinedNetworkController = udnController
@@ -182,6 +212,16 @@ func NewClusterManager(
 
 	if util.IsRouteAdvertisementsEnabled() {
 		cm.raController = routeadvertisements.NewController(cm.networkManager.Interface(), wf, ovnClient)
+		if config.ManagedBGP.FRRNamespace != "" {
+			cm.managedBGPController = managedbgp.NewController(wf, ovnClient.FRRClient, ovnClient.RouteAdvertisementsClient, recorder)
+		}
+		if config.Default.Transport == types.NetworkTransportNoOverlay {
+			cm.noOverlayController = nooverlay.NewController(wf, recorder)
+		}
+	}
+
+	if util.IsEVPNEnabled() {
+		cm.vtepController = vtepcontroller.NewController(wf, ovnClient, recorder)
 	}
 
 	return cm, nil
@@ -198,6 +238,10 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 
 	// Start networkManager before other controllers
 	if err := cm.networkManager.Start(); err != nil {
+		return err
+	}
+
+	if err := cm.nodeController.Start(); err != nil {
 		return err
 	}
 
@@ -222,7 +266,9 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 	}
 
 	if util.IsNetworkSegmentationSupportEnabled() {
-		if err := cm.endpointSliceMirrorController.Start(ctx, 1); err != nil {
+		// Use 5 workers to match the upstream kube-controller-manager default for EndpointSlice reconciliation:
+		// https://github.com/kubernetes/kubernetes/blob/462e759d1995c143fda094cd7f591b10fd8cdee6/pkg/controller/endpointslice/config/v1alpha1/defaults.go#L35
+		if err := cm.endpointSliceMirrorController.Start(ctx, 5); err != nil {
 			return err
 		}
 	}
@@ -249,8 +295,27 @@ func (cm *ClusterManager) Start(ctx context.Context) error {
 	}
 
 	if cm.raController != nil {
+		if cm.managedBGPController != nil {
+			if err := cm.managedBGPController.Start(); err != nil {
+				return err
+			}
+		}
 		err := cm.raController.Start()
 		if err != nil {
+			return err
+		}
+	}
+
+	// Start no-overlay validation controller
+	if cm.noOverlayController != nil {
+		err := cm.noOverlayController.Start()
+		if err != nil {
+			return err
+		}
+	}
+
+	if cm.vtepController != nil {
+		if err := cm.vtepController.Start(); err != nil {
 			return err
 		}
 	}
@@ -283,10 +348,22 @@ func (cm *ClusterManager) Stop() {
 	if cm.networkConnectController != nil {
 		cm.networkConnectController.Stop()
 	}
+	if cm.vtepController != nil {
+		cm.vtepController.Stop()
+		cm.vtepController = nil
+	}
 	if cm.raController != nil {
+		if cm.managedBGPController != nil {
+			cm.managedBGPController.Stop()
+		}
 		cm.raController.Stop()
 		cm.raController = nil
 	}
+	if cm.noOverlayController != nil {
+		cm.noOverlayController.Stop()
+		cm.noOverlayController = nil
+	}
+	cm.nodeController.Stop()
 }
 
 func (cm *ClusterManager) NewNetworkController(netInfo util.NetInfo) (networkmanager.NetworkController, error) {

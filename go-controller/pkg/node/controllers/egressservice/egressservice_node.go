@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package egressservice
 
 import (
@@ -23,16 +26,17 @@ import (
 	utilnet "k8s.io/utils/net"
 	"sigs.k8s.io/knftables"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressserviceapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
-	egressserviceinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions/egressservice/v1"
-	egressservicelisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/listers/egressservice/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	nodenft "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/nftables"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	egressserviceapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1"
+	egressserviceinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/informers/externalversions/egressservice/v1"
+	egressservicelisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/listers/egressservice/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	nodenft "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/nftables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 const (
@@ -56,7 +60,7 @@ type Controller struct {
 	// host node and tries to reach another node and in that case we don't want
 	// to snat its traffic, which matches the behavior of pods on different nodes
 	// when they try to reach a different node but hit the 102 "allow" lrp.
-	// See https://github.com/ovn-org/ovn-kubernetes/pull/3064 for more details.
+	// See https://github.com/ovn-kubernetes/ovn-kubernetes/pull/3064 for more details.
 	returnMark string
 	thisNode   string // name of the node we're running on
 
@@ -102,7 +106,7 @@ func NewController(stopCh <-chan struct{}, returnMark, thisNode string,
 	c.egressServiceLister = esInformer.Lister()
 	c.egressServiceSynced = esInformer.Informer().HasSynced
 	c.egressServiceQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controller.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "egressservices"},
 	)
 	_, err := esInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -949,7 +953,7 @@ func (c *Controller) allEndpointsFor(svc *corev1.Service, localOnly bool) (sets.
 			}
 			for _, ip := range ep.Addresses {
 				ipStr := utilnet.ParseIPSloppy(ip).String()
-				if !services.IsHostEndpoint(ipStr) {
+				if !services.IsHostEndpoint(ipStr, &util.DefaultNetInfo{}) {
 					epsToInsert.Insert(ipStr)
 				}
 			}

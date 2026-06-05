@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build linux
 // +build linux
 
@@ -19,7 +22,7 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 // inspired by arping timeout
@@ -311,7 +314,7 @@ func SyncConntrackForExternalGateways(gwIPsToKeep sets.Set[string], isPodInLocal
 			}
 		}
 
-		podIPs, err := GetPodIPsOfNetwork(pod, &DefaultNetInfo{})
+		podIPs, err := GetPodIPsOfNetwork(pod, &DefaultNetInfo{}, nil)
 		if err != nil && !errors.Is(err, ErrNoPodIPFound) {
 			errs = append(errs, fmt.Errorf("unable to fetch IP for pod %s/%s: %v", pod.Namespace, pod.Name, err))
 		}

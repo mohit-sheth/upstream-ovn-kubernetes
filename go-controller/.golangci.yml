@@ -33,10 +33,16 @@ linters:
           alias: ctrl
         - pkg: github.com/ovn-kubernetes/libovsdb/ovsdb
           alias: ""
-        - pkg: github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/util
+        - pkg: github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/util
           alias: nodeutil
-        - pkg: github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/types
+        - pkg: github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/types
           alias: nodetypes
+        - pkg: github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types
+          alias: hotypes
+        - pkg: github.com/containernetworking/cni/pkg/types
+          alias: cnitypes
+        - pkg: github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types
+          alias: ovncnitypes
       no-unaliased: true
     revive:
       rules:
@@ -68,6 +74,12 @@ linters:
       - third_party$
       - builtin$
       - examples$
+    rules:
+      # Ignore SA1019 in k8s v1.35 rebase
+      # https://github.com/ovn-kubernetes/ovn-kubernetes/issues/6102
+      - linters:
+          - staticcheck
+        text: "SA1019.*NewSimpleClientset"
 formatters:
   enable:
     - gci

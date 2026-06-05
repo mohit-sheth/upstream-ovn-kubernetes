@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -12,16 +15,15 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	listers "k8s.io/client-go/listers/core/v1"
-	"k8s.io/client-go/tools/cache"
 	utilnet "k8s.io/utils/net"
 	"sigs.k8s.io/yaml"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // This handles the "k8s.ovn.org/pod-networks" annotation on Pods, used to pass
-// information about networking from the master to the nodes. (The util.PodAnnotation
+// information about networking from the ovnkube-controller to the nodes. (The util.PodAnnotation
 // struct is also embedded in the cni.PodInterfaceInfo type that is passed from the
 // cniserver to the CNI shim.)
 //
@@ -50,8 +52,6 @@ import (
 // values.)
 
 const (
-	// OvnPodAnnotationName is the constant string representing the POD annotation key
-	OvnPodAnnotationName = "k8s.ovn.org/pod-networks"
 	// DefNetworkAnnotation is the pod annotation for the cluster-wide active network
 	DefNetworkAnnotation = "v1.multus-cni.io/default-network"
 	// UDNOpenPortsAnnotationName is the pod annotation to open default network pods on UDN pods.
@@ -210,14 +210,14 @@ func MarshalPodAnnotation(annotations map[string]string, podInfo *PodAnnotation,
 	if err != nil {
 		return nil, fmt.Errorf("failed marshaling podNetworks map %v", podNetworks)
 	}
-	annotations[OvnPodAnnotationName] = string(bytes)
+	annotations[types.OvnPodAnnotationName] = string(bytes)
 	return annotations, nil
 }
 
 // UnmarshalPodAnnotation returns the Pod's network info of the given network from pod.Annotations
 func UnmarshalPodAnnotation(annotations map[string]string, nadKey string) (*PodAnnotation, error) {
 	var err error
-	ovnAnnotation, ok := annotations[OvnPodAnnotationName]
+	ovnAnnotation, ok := annotations[types.OvnPodAnnotationName]
 	if !ok {
 		return nil, newAnnotationNotSetError("could not find OVN pod annotation in %v", annotations)
 	}
@@ -308,7 +308,7 @@ func UnmarshalPodAnnotation(annotations map[string]string, nadKey string) (*PodA
 
 func UnmarshalPodAnnotationAllNetworks(annotations map[string]string) (map[string]podAnnotation, error) {
 	podNetworks := make(map[string]podAnnotation)
-	ovnAnnotation, ok := annotations[OvnPodAnnotationName]
+	ovnAnnotation, ok := annotations[types.OvnPodAnnotationName]
 	if ok {
 		if err := json.Unmarshal([]byte(ovnAnnotation), &podNetworks); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal ovn pod annotation %q: %v",
@@ -318,10 +318,10 @@ func UnmarshalPodAnnotationAllNetworks(annotations map[string]string) (map[strin
 	return podNetworks, nil
 }
 
-// GetPodCIDRsWithFullMask returns the pod's IP addresses in a CIDR with FullMask format
-// Internally it calls GetPodIPsOfNetwork
-func GetPodCIDRsWithFullMask(pod *corev1.Pod, nInfo NetInfo) ([]*net.IPNet, error) {
-	podIPs, err := GetPodIPsOfNetwork(pod, nInfo)
+// GetPodCIDRsWithFullMask returns the pod's IP addresses in a CIDR with FullMask format.
+// Internally it calls GetPodIPsOfNetwork.
+func GetPodCIDRsWithFullMask(pod *corev1.Pod, nInfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]*net.IPNet, error) {
+	podIPs, err := GetPodIPsOfNetwork(pod, nInfo, getNetworkNameForNADKey)
 	if err != nil {
 		return nil, err
 	}
@@ -339,9 +339,13 @@ func GetPodCIDRsWithFullMask(pod *corev1.Pod, nInfo NetInfo) ([]*net.IPNet, erro
 // GetPodIPsOfNetwork returns the pod's IP addresses, first from the OVN annotation
 // and then falling back to the Pod Status IPs. This function is intended to
 // also return IPs for HostNetwork and other non-OVN-IPAM-ed pods.
-func GetPodIPsOfNetwork(pod *corev1.Pod, nInfo NetInfo) ([]net.IP, error) {
+// getNetworkNameForNADKey is required for user defined networks.
+func GetPodIPsOfNetwork(pod *corev1.Pod, nInfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]net.IP, error) {
 	if nInfo.IsUserDefinedNetwork() {
-		return SecondaryNetworkPodIPs(pod, nInfo)
+		if getNetworkNameForNADKey == nil {
+			return nil, fmt.Errorf("missing NAD resolver for network %q", nInfo.GetNetworkName())
+		}
+		return SecondaryNetworkPodIPs(pod, nInfo, getNetworkNameForNADKey)
 	}
 	return DefaultNetworkPodIPs(pod)
 }
@@ -392,27 +396,46 @@ func DefaultNetworkPodIPs(pod *corev1.Pod) ([]net.IP, error) {
 	return []net.IP{ip}, nil
 }
 
-func SecondaryNetworkPodIPs(pod *corev1.Pod, networkInfo NetInfo) ([]net.IP, error) {
+func SecondaryNetworkPodIPs(pod *corev1.Pod, networkInfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]net.IP, error) {
 	ips := []net.IP{}
-	podNadKeys, err := PodNadKeys(pod, networkInfo)
+	if getNetworkNameForNADKey == nil {
+		return nil, fmt.Errorf("missing NAD resolver for network %q", networkInfo.GetNetworkName())
+	}
+	podNADKeys, err := PodNADKeys(pod, networkInfo, getNetworkNameForNADKey)
 	if err != nil {
 		return nil, err
 	}
-	for _, nadKey := range podNadKeys {
+	for _, nadKey := range podNADKeys {
 		ips = append(ips, getAnnotatedPodIPs(pod, nadKey)...)
 	}
 	return ips, nil
 }
 
-// PodNadKeys returns pod's NAD keys associated with given network specified by netconf.
-// If netinfo belongs to user defined primary network, then retrieve NAD names from
-// netinfo.GetNADs() which is serving pod's namespace.
-// For all other cases, retrieve NAD names for the pod based on NetworkSelectionElement.
-func PodNadKeys(pod *corev1.Pod, netinfo NetInfo) ([]string, error) {
-	if netinfo.IsPrimaryNetwork() {
-		return GetPrimaryNetworkNADNamesForNamespaceFromNetInfo(pod.Namespace, netinfo)
+// PodNADKeys returns pod's NAD keys associated with given network specified by netconf.
+// For primary UDNs, retrieve NAD names for the pod based on its OVN annotations.
+// For secondary UDNs, retrieve NAD names for the pod based on NetworkSelectionElement.
+func PodNADKeys(pod *corev1.Pod, netinfo NetInfo, getNetworkNameForNADKey func(nadKey string) string) ([]string, error) {
+	if netinfo.IsUserDefinedNetwork() && getNetworkNameForNADKey == nil {
+		return nil, fmt.Errorf("missing NAD resolver for network %q", netinfo.GetNetworkName())
 	}
-	on, networkMap, err := GetPodNADToNetworkMapping(pod, netinfo)
+
+	if netinfo.IsPrimaryNetwork() {
+		podNetworks, err := UnmarshalPodAnnotationAllNetworks(pod.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		nadKeys := make([]string, 0, len(podNetworks))
+		for nadKey := range podNetworks {
+			networkName := getNetworkNameForNADKey(nadKey)
+			if networkName == "" || networkName != netinfo.GetNetworkName() {
+				continue
+			}
+			nadKeys = append(nadKeys, nadKey)
+		}
+		return nadKeys, nil
+	}
+
+	on, networkMap, err := getPodNADToNetworkMapping(pod, netinfo, getNetworkNameForNADKey)
 	// skip pods that are not on this network
 	if err != nil {
 		return nil, err
@@ -424,20 +447,6 @@ func PodNadKeys(pod *corev1.Pod, netinfo NetInfo) ([]string, error) {
 		nadKeys = append(nadKeys, nadKey)
 	}
 	return nadKeys, nil
-}
-
-func GetPrimaryNetworkNADNamesForNamespaceFromNetInfo(namespace string, netinfo NetInfo) ([]string, error) {
-	for _, nadName := range netinfo.GetNADs() {
-		ns, _, err := cache.SplitMetaNamespaceKey(nadName)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing nad name %s from network %s: %v", nadName, netinfo.GetNetworkName(), err)
-		}
-		if ns != namespace {
-			continue
-		}
-		return []string{nadName}, nil
-	}
-	return []string{}, nil
 }
 
 func getAnnotatedPodIPs(pod *corev1.Pod, nadKey string) []net.IP {

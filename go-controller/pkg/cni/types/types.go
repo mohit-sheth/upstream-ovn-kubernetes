@@ -1,14 +1,18 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package types
 
 import (
+	"encoding/json"
 	"net"
 
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 )
 
 // NetConf is CNI NetConf with DeviceID
 type NetConf struct {
-	types.NetConf
+	cnitypes.NetConf
 	// Role is valid only on L3 / L2 topologies. Not on localnet.
 	// It allows for using this network to be either secondary or
 	// primary user defined network for the pod.
@@ -81,9 +85,15 @@ type NetConf struct {
 	PhysicalNetworkName string `json:"physicalNetworkName,omitempty"`
 
 	// Transport describes the transport protocol for east-west traffic.
-	// Valid values are "nooverlay", "geneve", and "evpn".
-	// Defaults to "geneve".
+	// Valid values are "no-overlay" and "evpn".
+	// When omitted, the default OVN overlay transport is used.
 	Transport string `json:"transport,omitempty"`
+
+	// OutboundSNAT configures SNAT behavior for outbound traffic from pods
+	// on user-defined networks in no-overlay mode.
+	// Valid values are "enabled" and "disabled".
+	// Only valid when Transport is "no-overlay".
+	OutboundSNAT string `json:"outboundSNAT,omitempty"`
 
 	// EVPNConfig contains configuration for EVPN mode.
 	// Only valid when Transport is "evpn".
@@ -111,6 +121,72 @@ type NetConf struct {
 	} `json:"runtimeConfig,omitempty"`
 }
 
+// MarshalJSON overrides the promoted PluginConf.MarshalJSON which only marshals
+// base CNI fields and silently drops OVN-specific fields. containernetworking/cni
+// v1.3.0 changed types.NetConf from a distinct type to a type alias for PluginConf,
+// causing PluginConf.MarshalJSON to be promoted into any struct embedding types.NetConf.
+func (n NetConf) MarshalJSON() ([]byte, error) {
+	// cniConf is a new type with the same layout as cnitypes.PluginConf but without
+	// its MarshalJSON method, so embedding it uses standard struct marshaling.
+	type cniConf cnitypes.PluginConf
+	type netConf struct {
+		cniConf
+		Role                  string      `json:"role,omitempty"`
+		Topology              string      `json:"topology,omitempty"`
+		NADName               string      `json:"netAttachDefName,omitempty"`
+		MTU                   int         `json:"mtu,omitempty"`
+		Subnets               string      `json:"subnets,omitempty"`
+		ExcludeSubnets        string      `json:"excludeSubnets,omitempty"`
+		ReservedSubnets       string      `json:"reservedSubnets,omitempty"`
+		InfrastructureSubnets string      `json:"infrastructureSubnets,omitempty"`
+		JoinSubnet            string      `json:"joinSubnet,omitempty"`
+		TransitSubnet         string      `json:"transitSubnet,omitempty"`
+		DefaultGatewayIPs     string      `json:"defaultGatewayIPs,omitempty"`
+		VLANID                int         `json:"vlanID,omitempty"`
+		AllowPersistentIPs    bool        `json:"allowPersistentIPs,omitempty"`
+		PhysicalNetworkName   string      `json:"physicalNetworkName,omitempty"`
+		Transport             string      `json:"transport,omitempty"`
+		OutboundSNAT          string      `json:"outboundSNAT,omitempty"`
+		EVPN                  *EVPNConfig `json:"evpn,omitempty"`
+		DeviceID              string      `json:"deviceID,omitempty"`
+		LogFile               string      `json:"logFile,omitempty"`
+		LogLevel              string      `json:"logLevel,omitempty"`
+		LogFileMaxSize        int         `json:"logfile-maxsize"`
+		LogFileMaxBackups     int         `json:"logfile-maxbackups"`
+		LogFileMaxAge         int         `json:"logfile-maxage"`
+		RuntimeConfig         struct {
+			CNIDeviceInfoFile string `json:"CNIDeviceInfoFile,omitempty"`
+		} `json:"runtimeConfig,omitempty"`
+	}
+	return json.Marshal(netConf{
+		cniConf:               cniConf(n.NetConf),
+		Role:                  n.Role,
+		Topology:              n.Topology,
+		NADName:               n.NADName,
+		MTU:                   n.MTU,
+		Subnets:               n.Subnets,
+		ExcludeSubnets:        n.ExcludeSubnets,
+		ReservedSubnets:       n.ReservedSubnets,
+		InfrastructureSubnets: n.InfrastructureSubnets,
+		JoinSubnet:            n.JoinSubnet,
+		TransitSubnet:         n.TransitSubnet,
+		DefaultGatewayIPs:     n.DefaultGatewayIPs,
+		VLANID:                n.VLANID,
+		AllowPersistentIPs:    n.AllowPersistentIPs,
+		PhysicalNetworkName:   n.PhysicalNetworkName,
+		Transport:             n.Transport,
+		OutboundSNAT:          n.OutboundSNAT,
+		EVPN:                  n.EVPN,
+		DeviceID:              n.DeviceID,
+		LogFile:               n.LogFile,
+		LogLevel:              n.LogLevel,
+		LogFileMaxSize:        n.LogFileMaxSize,
+		LogFileMaxBackups:     n.LogFileMaxBackups,
+		LogFileMaxAge:         n.LogFileMaxAge,
+		RuntimeConfig:         n.RuntimeConfig,
+	})
+}
+
 // EVPNConfig contains EVPN-specific configuration for the network.
 type EVPNConfig struct {
 	// VTEP is the name of the VTEP CR that defines VTEP IPs for EVPN.
@@ -127,6 +203,9 @@ type VRFConfig struct {
 	VNI int32 `json:"vni"`
 	// RouteTarget is the BGP route target for this VRF.
 	RouteTarget string `json:"routeTarget,omitempty"`
+	// VID is the VLAN ID used for local traffic segmentation on each node.
+	// Allocated cluster-wide by the UDN controller, one per VRF.
+	VID int `json:"vid,omitempty"`
 }
 
 // NetworkSelectionElement represents one element of the JSON format

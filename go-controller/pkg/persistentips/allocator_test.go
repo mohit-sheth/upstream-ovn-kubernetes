@@ -1,10 +1,13 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package persistentips
 
 import (
 	"context"
 	"testing"
 
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 	ipamclaimsapi "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1"
 	fakeipamclaimclient "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1/apis/clientset/versioned/fake"
 	ipamclaimsfactory "github.com/k8snetworkplumbingwg/ipamclaims/pkg/crd/ipamclaims/v1alpha1/apis/informers/externalversions"
@@ -14,13 +17,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	ovnkclient "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	ovnktypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	ovnkclient "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	ovnktypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -52,7 +55,7 @@ var _ = Describe("Persistent IP allocator operations", func() {
 
 		BeforeEach(func() {
 			netConf := &ovncnitypes.NetConf{
-				NetConf:  types.NetConf{Name: networkName},
+				NetConf:  cnitypes.NetConf{Name: networkName},
 				Topology: ovnktypes.Layer2Topology,
 				Subnets:  "192.10.10.0/24",
 			}
@@ -413,7 +416,7 @@ func generateIPAMClaimsListerAndTeardownFunc(stopChannel <-chan struct{}, ipamCl
 
 func dummyNetconf(networkName string) *ovncnitypes.NetConf {
 	return &ovncnitypes.NetConf{
-		NetConf:  types.NetConf{Name: networkName},
+		NetConf:  cnitypes.NetConf{Name: networkName},
 		Topology: ovnktypes.Layer2Topology,
 		Subnets:  "192.10.10.0/24",
 	}

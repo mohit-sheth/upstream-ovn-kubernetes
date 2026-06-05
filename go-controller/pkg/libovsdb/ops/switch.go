@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ops
 
 import (
@@ -8,9 +11,9 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 // LOGICAL_SWITCH OPs
@@ -177,6 +180,43 @@ func RemoveLoadBalancersFromLogicalSwitchOps(nbClient libovsdbclient.Client, ops
 		Model:            sw,
 		OnModelMutations: []interface{}{&sw.LoadBalancer},
 		// if we want to delete loadbalancer from the switch that doesn't exist, that is noop
+		ErrNotFound: false,
+		BulkOp:      false,
+	}
+
+	modelClient := newModelClient(nbClient)
+	return modelClient.DeleteOps(ops, opModel)
+}
+
+// AddLoadBalancerGroupsToLogicalSwitchOps adds the provided load balancer groups to the
+// provided logical switch and returns the corresponding ops
+func AddLoadBalancerGroupsToLogicalSwitchOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, sw *nbdb.LogicalSwitch, lbGroups ...*nbdb.LoadBalancerGroup) ([]ovsdb.Operation, error) {
+	sw.LoadBalancerGroup = make([]string, 0, len(lbGroups))
+	for _, lbg := range lbGroups {
+		sw.LoadBalancerGroup = append(sw.LoadBalancerGroup, lbg.UUID)
+	}
+	opModel := operationModel{
+		Model:            sw,
+		OnModelMutations: []interface{}{&sw.LoadBalancerGroup},
+		ErrNotFound:      true,
+		BulkOp:           false,
+	}
+
+	modelClient := newModelClient(nbClient)
+	return modelClient.CreateOrUpdateOps(ops, opModel)
+}
+
+// RemoveLoadBalancerGroupsFromLogicalSwitchOps removes the provided load balancer groups from the
+// provided logical switch and returns the corresponding ops
+func RemoveLoadBalancerGroupsFromLogicalSwitchOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, sw *nbdb.LogicalSwitch, lbGroups ...*nbdb.LoadBalancerGroup) ([]ovsdb.Operation, error) {
+	sw.LoadBalancerGroup = make([]string, 0, len(lbGroups))
+	for _, lbg := range lbGroups {
+		sw.LoadBalancerGroup = append(sw.LoadBalancerGroup, lbg.UUID)
+	}
+	opModel := operationModel{
+		Model:            sw,
+		OnModelMutations: []interface{}{&sw.LoadBalancerGroup},
+		// if we want to delete load balancer group from the switch that doesn't exist, that is noop
 		ErrNotFound: false,
 		BulkOp:      false,
 	}
@@ -381,6 +421,13 @@ func CreateOrUpdateLogicalSwitchPortsAndSwitch(nbClient libovsdbclient.Client, s
 	return createOrUpdateLogicalSwitchPorts(nbClient, sw, true, lsps...)
 }
 
+// CreateOrUpdateLogicalSwitchPortsAndSwitchOps creates or updates the provided
+// logical switch ports and adds them to the provided logical switch creating it
+// if it does not exist and returns the corresponding ops
+func CreateOrUpdateLogicalSwitchPortsAndSwitchOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, sw *nbdb.LogicalSwitch, lsps ...*nbdb.LogicalSwitchPort) ([]ovsdb.Operation, error) {
+	return createOrUpdateLogicalSwitchPortsOps(nbClient, ops, sw, true, true, nil, lsps...)
+}
+
 // DeleteLogicalSwitchPortsOps deletes the provided logical switch ports, removes
 // them from the provided logical switch and returns the corresponding ops
 func DeleteLogicalSwitchPortsOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, sw *nbdb.LogicalSwitch, lsps ...*nbdb.LogicalSwitchPort) ([]ovsdb.Operation, error) {
@@ -479,39 +526,4 @@ func DeleteLogicalSwitchPortsWithPredicateOps(nbClient libovsdbclient.Client, op
 
 	m := newModelClient(nbClient)
 	return m.DeleteOps(ops, opModels...)
-}
-
-// UpdateLogicalSwitchPortSetOptions sets options on the provided logical switch
-// port adding any missing, removing the ones set to an empty value and updating
-// existing
-func UpdateLogicalSwitchPortSetOptions(nbClient libovsdbclient.Client, lsp *nbdb.LogicalSwitchPort) error {
-	options := lsp.Options
-	lsp, err := GetLogicalSwitchPort(nbClient, lsp)
-	if err != nil {
-		return err
-	}
-
-	if lsp.Options == nil {
-		lsp.Options = map[string]string{}
-	}
-
-	for k, v := range options {
-		if v == "" {
-			delete(lsp.Options, k)
-		} else {
-			lsp.Options[k] = v
-		}
-	}
-
-	opModel := operationModel{
-		// For LSP's Name is a valid index, so no predicate is needed
-		Model:          lsp,
-		OnModelUpdates: []interface{}{&lsp.Options},
-		ErrNotFound:    true,
-		BulkOp:         false,
-	}
-
-	m := newModelClient(nbClient)
-	_, err = m.CreateOrUpdate(opModel)
-	return err
 }

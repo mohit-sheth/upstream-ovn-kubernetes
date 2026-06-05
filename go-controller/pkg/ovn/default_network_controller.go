@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -15,37 +18,38 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	hotypes "github.com/ovn-org/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	egressqoslisters "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/listers/egressqos/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics/recorders"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/observability"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	anpcontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/admin_network_policy"
-	apbroutecontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute"
-	efcontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egressfirewall"
-	egresssvc "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
-	svccontroller "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
-	dnsnameresolver "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/dns_name_resolver"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/logical_router_policy"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/nat"
-	lsm "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/logical_switch_manager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/routeimport"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/topology"
-	zoneic "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/zone_interconnect"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	hotypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/hybrid-overlay/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	egressqoslisters "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/listers/egressqos/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics/recorders"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/observability"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/addresssetmanager"
+	anpcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/admin_network_policy"
+	apbroutecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/apbroute"
+	efcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/egressfirewall"
+	egresssvc "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/egressservice"
+	networkconnectcontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/networkconnect"
+	svccontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/unidling"
+	dnsnameresolver "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/dns_name_resolver"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/logical_router_policy"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/external_ids_syncer/nat"
+	lsm "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/logical_switch_manager"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/routeimport"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/topology"
+	zoneic "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/zone_interconnect"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/syncmap"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
-
-const DefaultNetworkControllerName = "default-network-controller"
 
 // DefaultNetworkController structure is the object which holds the controls for starting
 // and reacting upon the watched resources (e.g. pods, endpoints) for default l3 network
@@ -98,6 +102,9 @@ type DefaultNetworkController struct {
 	// Controller used for programming OVN for Admin Network Policy
 	anpController *anpcontroller.Controller
 
+	// Controller used for programming OVN for Network Connect
+	networkConnectController *networkconnectcontroller.Controller
+
 	// Controller used to handle the admin policy based external route resources
 	apbExternalRouteController *apbroutecontroller.ExternalGatewayMasterController
 
@@ -122,7 +129,6 @@ type DefaultNetworkController struct {
 	nodeClusterRouterPortFailed sync.Map
 	hybridOverlayFailed         sync.Map
 	syncZoneICFailed            sync.Map
-	syncHostNetAddrSetFailed    sync.Map
 	syncEIPNodeRerouteFailed    sync.Map
 	syncEIPNodeFailed           sync.Map
 
@@ -146,10 +152,12 @@ func NewDefaultNetworkController(
 	routeImportManager routeimport.Manager,
 	eIPController *EgressIPController,
 	portCache *PortCache,
+	addressSetManager *addresssetmanager.AddressSetManager,
+	nodeReconciler *nodecontroller.NodeController,
 ) (*DefaultNetworkController, error) {
 	stopChan := make(chan struct{})
 	wg := &sync.WaitGroup{}
-	return newDefaultNetworkControllerCommon(cnci, stopChan, wg, nil, networkManager, routeImportManager, observManager, eIPController, portCache)
+	return newDefaultNetworkControllerCommon(cnci, stopChan, wg, nil, networkManager, routeImportManager, observManager, eIPController, portCache, addressSetManager, nodeReconciler)
 }
 
 func newDefaultNetworkControllerCommon(
@@ -162,7 +170,13 @@ func newDefaultNetworkControllerCommon(
 	observManager *observability.Manager,
 	eIPController *EgressIPController,
 	portCache *PortCache,
+	addressSetManager *addresssetmanager.AddressSetManager,
+	nodeReconciler *nodecontroller.NodeController,
 ) (*DefaultNetworkController, error) {
+	if nodeReconciler == nil {
+		return nil, fmt.Errorf("shared node reconciler is required for the default network controller")
+	}
+
 	defaultNetInfo := &util.DefaultNetInfo{}
 
 	if addressSetFactory == nil {
@@ -182,12 +196,8 @@ func newDefaultNetworkControllerCommon(
 		return nil, fmt.Errorf("unable to create new service controller while creating new default network controller: %w", err)
 	}
 
-	var zoneICHandler *zoneic.ZoneInterconnectHandler
-	var zoneChassisHandler *zoneic.ZoneChassisHandler
-	if config.OVNKubernetesFeature.EnableInterconnect {
-		zoneICHandler = zoneic.NewZoneInterconnectHandler(defaultNetInfo, cnci.nbClient, cnci.sbClient, cnci.watchFactory)
-		zoneChassisHandler = zoneic.NewZoneChassisHandler(cnci.sbClient)
-	}
+	zoneICHandler := zoneic.NewZoneInterconnectHandler(defaultNetInfo, cnci.nbClient, cnci.sbClient, cnci.watchFactory)
+	zoneChassisHandler := zoneic.NewZoneChassisHandler(cnci.sbClient)
 	apbExternalRouteController, err := apbroutecontroller.NewExternalMasterController(
 		cnci.kube.APBRouteClient,
 		defaultStopChan,
@@ -197,7 +207,7 @@ func newDefaultNetworkControllerCommon(
 		cnci.watchFactory.NodeCoreInformer().Lister(),
 		cnci.nbClient,
 		addressSetFactory,
-		DefaultNetworkControllerName,
+		types.DefaultNetworkControllerName,
 		cnci.zone,
 	)
 	if err != nil {
@@ -207,7 +217,7 @@ func newDefaultNetworkControllerCommon(
 	oc := &DefaultNetworkController{
 		BaseNetworkController: BaseNetworkController{
 			CommonNetworkControllerInfo: *cnci,
-			controllerName:              DefaultNetworkControllerName,
+			controllerName:              types.DefaultNetworkControllerName,
 			ReconcilableNetInfo:         defaultNetInfo,
 			lsManager:                   lsm.NewLogicalSwitchManager(),
 			logicalPortCache:            portCache,
@@ -216,7 +226,6 @@ func newDefaultNetworkControllerCommon(
 			addressSetFactory:           addressSetFactory,
 			networkPolicies:             syncmap.NewSyncMap[*networkPolicy](),
 			sharedNetpolPortGroups:      syncmap.NewSyncMap[*defaultDenyPortGroups](),
-			podSelectorAddressSets:      syncmap.NewSyncMap[*PodSelectorAddressSet](),
 			stopChan:                    defaultStopChan,
 			wg:                          defaultWg,
 			localZoneNodes:              &sync.Map{},
@@ -225,6 +234,9 @@ func newDefaultNetworkControllerCommon(
 			observManager:               observManager,
 			networkManager:              networkManager,
 			routeImportManager:          routeImportManager,
+			addressSetManager:           addressSetManager,
+			nodeReconciler:              nodeReconciler,
+			nodeAnnotationCache:         nodeReconciler.AnnotationCache(),
 		},
 		externalGatewayRouteInfo:   apbExternalRouteController.ExternalGWRouteInfoCache,
 		eIPC:                       eIPController,
@@ -244,14 +256,16 @@ func newDefaultNetworkControllerCommon(
 	oc.ovnClusterLRPToJoinIfAddrs = gwLRPIfAddrs
 
 	oc.initRetryFramework()
+	if oc.eIPC != nil {
+		oc.eIPC.retryEgressIPPods = oc.retryEgressIPPods
+	}
 	return oc, nil
 }
 
 func (oc *DefaultNetworkController) initRetryFramework() {
-	// Init the retry framework for pods, namespaces, nodes, network policies, egress firewalls,
+	// Init the retry framework for pods, namespaces, network policies, egress firewalls,
 	// egress IP (and dependent namespaces, pods, nodes), cloud private ip config.
 	oc.retryPods = oc.newRetryFramework(factory.PodType)
-	oc.retryNodes = oc.newRetryFramework(factory.NodeType)
 	oc.retryEgressIPs = oc.newRetryFramework(factory.EgressIPType)
 	oc.retryEgressIPNamespaces = oc.newRetryFramework(factory.EgressIPNamespaceType)
 	oc.retryEgressIPPods = oc.newRetryFramework(factory.EgressIPPodType)
@@ -261,7 +275,7 @@ func (oc *DefaultNetworkController) initRetryFramework() {
 }
 
 // newRetryFramework builds and returns a retry framework for the input resource
-// type and assigns all ovnk-master-specific function attributes in the returned struct;
+// type and assigns all ovnkube-controller-specific function attributes in the returned struct;
 // these functions will then be called by the retry logic in the retry package when
 // WatchResource() is called.
 func (oc *DefaultNetworkController) newRetryFramework(
@@ -281,6 +295,7 @@ func (oc *DefaultNetworkController) newRetryFramework(
 		EventHandler:           eventHandler,
 	}
 	r := retry.NewRetryFramework(
+		oc.GetNetworkName()+"/networkController",
 		oc.stopChan,
 		oc.wg,
 		oc.watchFactory,
@@ -292,11 +307,6 @@ func (oc *DefaultNetworkController) newRetryFramework(
 func (oc *DefaultNetworkController) syncDb() error {
 	var err error
 	// sync shared resources
-	// pod selector address sets
-	err = oc.cleanupPodSelectorAddressSets()
-	if err != nil {
-		return fmt.Errorf("cleaning up stale pod selector address sets for network %v failed : %w", oc.GetNetworkName(), err)
-	}
 	// LRP syncer must only be run once and because default controller always runs, it can perform LRP updates.
 	lrpSyncer := logical_router_policy.NewLRPSyncer(oc.nbClient, oc.controllerName)
 	if err = lrpSyncer.Sync(); err != nil {
@@ -333,19 +343,258 @@ func (oc *DefaultNetworkController) Start(ctx context.Context) error {
 
 // Stop gracefully stops the controller
 func (oc *DefaultNetworkController) Stop() {
+	oc.DeregisterNodeHandler()
 	if oc.dnsNameResolver != nil {
 		oc.dnsNameResolver.Shutdown()
 	}
 	if oc.efController != nil {
 		oc.efController.Stop()
 	}
+	if oc.eIPC != nil {
+		oc.eIPC.StopNADReconciler()
+	}
 	if oc.routeImportManager != nil {
 		oc.routeImportManager.ForgetNetwork(oc.GetNetworkName())
+	}
+	if oc.networkConnectController != nil {
+		oc.networkConnectController.Stop()
 	}
 
 	close(oc.stopChan)
 	oc.cancelableCtx.Cancel()
 	oc.wg.Wait()
+}
+
+func (oc *DefaultNetworkController) ServiceController() *svccontroller.Controller {
+	return oc.svcController
+}
+
+func (oc *DefaultNetworkController) RegisterNodeHandler() error {
+	return oc.nodeReconciler.RegisterNetworkController(oc)
+}
+
+func (oc *DefaultNetworkController) startNodeReconciliation() error {
+	if err := oc.nodeReconciler.Start(); err != nil {
+		return err
+	}
+	if err := oc.RegisterNodeHandler(); err != nil {
+		return err
+	}
+	if err := oc.waitForInitialNodeSync(); err != nil {
+		oc.DeregisterNodeHandler()
+		return err
+	}
+	return nil
+}
+
+func (oc *DefaultNetworkController) waitForInitialNodeSync() error {
+	nodes, err := oc.GetLocalZoneNodes()
+	if err != nil {
+		return fmt.Errorf("failed to get local zone nodes for initial node sync wait: %w", err)
+	}
+	for _, node := range nodes {
+		if util.NoHostSubnet(node) {
+			continue
+		}
+		switchName := oc.GetNetworkScopedSwitchName(node.Name)
+		if err := wait.PollUntilContextTimeout(context.Background(), 30*time.Millisecond, 30*time.Second, true, func(_ context.Context) (bool, error) {
+			if oc.hasLocalNodeSwitchState(node) {
+				return true, nil
+			}
+			if _, failed := oc.addNodeFailed.Load(node.Name); failed {
+				// Allow startup to continue when the initial node add failed and the
+				// shared node controller is retrying in the background.
+				return true, nil
+			}
+			return false, nil
+		}); err != nil {
+			return fmt.Errorf("failed waiting for local zone node %s logical switch %s for network %s: %w",
+				node.Name, switchName, oc.GetNetworkName(), err)
+		}
+	}
+	return nil
+}
+
+func (oc *DefaultNetworkController) SyncNodes(nodes []*corev1.Node) error {
+	return oc.syncNodes(nodesToInterfaces(nodes))
+}
+
+func defaultNodeSubnetChangedWithState(oldNode, newNode *corev1.Node, oldState, newState *nodecontroller.NodeAnnotationState) bool {
+	if !util.NodeSubnetAnnotationChanged(oldNode, newNode) {
+		return false
+	}
+	if oldState == nil || newState == nil {
+		return util.NodeSubnetAnnotationChangedForNetwork(oldNode, newNode, types.DefaultNetworkName)
+	}
+	return nodecontroller.NodeSubnetAnnotationChangedForNetworkWithState(oldState, newState, types.DefaultNetworkName)
+}
+
+func (oc *DefaultNetworkController) ReconcileNode(oldNode, newNode *corev1.Node, oldState, newState *nodecontroller.NodeAnnotationState) error {
+	if newNode == nil {
+		if oldNode == nil {
+			return fmt.Errorf("nil node received for network %s", oc.GetNetworkName())
+		}
+		err := oc.deleteNodeEvent(oldNode)
+		if err != nil {
+			oc.recordNodeErrorEvent(oldNode, err)
+		}
+		return err
+	}
+
+	var switchToOvnNode bool
+	if config.HybridOverlay.Enabled {
+		if util.NoHostSubnet(newNode) && (oldNode == nil || !util.NoHostSubnet(oldNode)) {
+			// The node switched to hybrid-overlay management, so reconcile the HO-specific topology instead.
+			err := oc.addUpdateHoNodeEvent(newNode)
+			if err != nil {
+				oc.recordNodeErrorEvent(newNode, err)
+			}
+			return err
+		} else if oldNode != nil && !util.NoHostSubnet(newNode) && util.NoHostSubnet(oldNode) {
+			// The node switched from hybrid-overlay management back to OVN-managed networking.
+			if err := oc.deleteHoNodeEvent(oldNode); err != nil {
+				oc.recordNodeErrorEvent(oldNode, err)
+				return err
+			}
+			switchToOvnNode = true
+		} else if oldNode == nil && !util.NoHostSubnet(newNode) {
+			if err := oc.deleteHoNodeEvent(newNode); err != nil {
+				oc.recordNodeErrorEvent(newNode, err)
+				return err
+			}
+		}
+	}
+
+	var aggregatedErrors []error
+	if oc.isLocalZoneNode(newNode) {
+		var nodeSyncsParam *nodeSyncs
+		hoNeedsCleanup := false
+		if !config.HybridOverlay.Enabled {
+			if _, exists := newNode.Annotations[hotypes.HybridOverlayDRIP]; exists {
+				hoNeedsCleanup = true
+			}
+			if _, exists := newNode.Annotations[hotypes.HybridOverlayDRMAC]; exists {
+				hoNeedsCleanup = true
+			}
+		}
+
+		if oldNode == nil {
+			_, nodeSync := oc.addNodeFailed.Load(newNode.Name)
+			_, clusterRtrSync := oc.nodeClusterRouterPortFailed.Load(newNode.Name)
+			_, mgmtSync := oc.mgmtPortFailed.Load(newNode.Name)
+			_, gwSync := oc.gatewaysFailed.Load(newNode.Name)
+			_, hoSync := oc.hybridOverlayFailed.Load(newNode.Name)
+			_, zoneICSync := oc.syncZoneICFailed.Load(newNode.Name)
+			// When a bootstrap retry first failed while the node was remote, only syncZoneICFailed may be set.
+			// If the node later becomes local before any local switch state was populated in lsManager, we must
+			// do the full local node add instead of replaying only the previous remote-zone retry state.
+			localSwitchReady := oc.hasLocalNodeSwitchState(newNode)
+			if localSwitchReady && (nodeSync || clusterRtrSync || mgmtSync || gwSync || hoSync || zoneICSync) {
+				nodeSyncsParam = &nodeSyncs{
+					syncNode:              nodeSync,
+					syncClusterRouterPort: clusterRtrSync,
+					syncMgmtPort:          mgmtSync,
+					syncGw:                gwSync,
+					syncHo:                hoSync || hoNeedsCleanup,
+					syncZoneIC:            zoneICSync,
+				}
+			} else {
+				nodeSyncsParam = &nodeSyncs{
+					syncNode:              true,
+					syncClusterRouterPort: true,
+					syncMgmtPort:          true,
+					syncGw:                true,
+					syncHo:                config.HybridOverlay.Enabled || hoNeedsCleanup,
+					syncZoneIC:            true,
+				}
+			}
+		} else if oc.isLocalZoneNode(oldNode) {
+			_, nodeSync := oc.addNodeFailed.Load(newNode.Name)
+			nodeSync = nodeSync || defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState)
+			_, failed := oc.nodeClusterRouterPortFailed.Load(newNode.Name)
+			clusterRtrSync := failed || nodeChassisChanged(oldNode, newNode) || defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState)
+			_, failed = oc.mgmtPortFailed.Load(newNode.Name)
+			mgmtSync := failed || defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState)
+			_, failed = oc.gatewaysFailed.Load(newNode.Name)
+			gwSync := failed || gatewayChanged(oldNode, newNode, oldState, newState, oc.GetNetworkName()) ||
+				nodeChassisChanged(oldNode, newNode) ||
+				defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState) ||
+				hostCIDRsChanged(oldNode, newNode) || nodeGatewayMTUSupportChanged(oldNode, newNode)
+			_, hoSync := oc.hybridOverlayFailed.Load(newNode.Name)
+			_, syncZoneIC := oc.syncZoneICFailed.Load(newNode.Name)
+			syncZoneIC = syncZoneIC || oc.nodeZoneClusterChanged(oldNode, newNode) || primaryAddrChanged(oldNode, newNode)
+			nodeSyncsParam = &nodeSyncs{
+				syncNode:              nodeSync,
+				syncClusterRouterPort: clusterRtrSync,
+				syncMgmtPort:          mgmtSync,
+				syncGw:                gwSync,
+				syncHo:                switchToOvnNode || hoSync || hoNeedsCleanup,
+				syncZoneIC:            syncZoneIC,
+			}
+		} else {
+			klog.Infof("Node %s moved from the remote zone %s to local zone %s, in network: %q",
+				newNode.Name, util.GetNodeZone(oldNode), util.GetNodeZone(newNode), oc.GetNetworkName())
+			nodeSyncsParam = &nodeSyncs{
+				syncNode:              true,
+				syncClusterRouterPort: true,
+				syncMgmtPort:          true,
+				syncGw:                true,
+				syncHo:                true,
+				syncZoneIC:            true,
+			}
+		}
+		if err := oc.addUpdateLocalNodeEvent(newNode, nodeSyncsParam); err != nil {
+			aggregatedErrors = append(aggregatedErrors, err)
+		}
+	} else {
+		_, syncZoneIC := oc.syncZoneICFailed.Load(newNode.Name)
+		if oldNode == nil {
+			syncZoneIC = true
+		} else {
+			// Sync interconnect state when the node moved from local to remote, changed zone clusters,
+			// switched from hybrid-overlay to OVN management, or its remote reachability inputs changed.
+			syncZoneIC = syncZoneIC || oc.isLocalZoneNode(oldNode) ||
+				defaultNodeSubnetChangedWithState(oldNode, newNode, oldState, newState) ||
+				oc.nodeZoneClusterChanged(oldNode, newNode) ||
+				switchToOvnNode ||
+				util.NodeEncapIPsChanged(oldNode, newNode) ||
+				util.NodePrimaryDPUHostAddrAnnotationChanged(oldNode, newNode)
+		}
+		if syncZoneIC {
+			klog.Infof("Node %q in remote zone %q, network %q, needs interconnect zone sync up",
+				newNode.Name, util.GetNodeZone(newNode), oc.GetNetworkName())
+		}
+		// Reprovisioning the DPU, including OVS, changes the chassis system ID without changing the node.
+		// Delete the stale remote chassis mapping so the new chassis can be associated cleanly.
+		if oldNode != nil && config.OvnKubeNode.Mode == types.NodeModeDPU && nodeChassisChanged(oldNode, newNode) {
+			if err := oc.zoneChassisHandler.DeleteRemoteZoneNode(oldNode); err != nil {
+				aggregatedErrors = append(aggregatedErrors, err)
+			}
+			syncZoneIC = true
+		}
+		if err := oc.addUpdateRemoteNodeEvent(newNode, syncZoneIC); err != nil {
+			aggregatedErrors = append(aggregatedErrors, err)
+		}
+	}
+
+	err := utilerrors.Join(aggregatedErrors...)
+	if err != nil {
+		oc.recordNodeErrorEvent(newNode, err)
+	}
+	return err
+}
+
+// hasLocalNodeSwitchState returns true once the local-node add path has populated
+// lsManager for this node. We use this to distinguish "retry only the failed
+// pieces of an already-created local node" from "the node never completed its
+// first local add, so we must do the full local sync".
+func (oc *DefaultNetworkController) hasLocalNodeSwitchState(node *corev1.Node) bool {
+	switchName := oc.GetNetworkScopedSwitchName(node.Name)
+	if util.NoHostSubnet(node) {
+		// NoHostSubnet nodes are tracked in lsManager as switch entries with no subnets.
+		return oc.lsManager.IsNonHostSubnetSwitch(switchName)
+	}
+	return oc.lsManager.GetSwitchSubnets(switchName) != nil
 }
 
 // init runs a subnet IPAM and a controller that watches arrival/departure
@@ -408,15 +657,15 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 	start := time.Now()
 
 	// WatchNamespaces() should be started first because it has no other
-	// dependencies, and WatchNodes() depends on it
+	// dependencies, and node startup depends on it.
 	if err := WithSyncDurationMetric("namespace", oc.WatchNamespaces); err != nil {
 		return err
 	}
 
-	// WatchNodes must be started next because it creates the node switch
+	// Node reconciliation must be started next because it creates the node switch
 	// which most other watches depend on.
-	// https://github.com/ovn-org/ovn-kubernetes/pull/859
-	if err := WithSyncDurationMetric("node", oc.WatchNodes); err != nil {
+	// https://github.com/ovn-kubernetes/ovn-kubernetes/pull/859
+	if err := WithSyncDurationMetric("node", oc.startNodeReconciliation); err != nil {
 		return err
 	}
 
@@ -452,6 +701,9 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 	}
 
 	if config.OVNKubernetesFeature.EnableEgressIP {
+		if err := oc.eIPC.StartNADReconciler(); err != nil {
+			return err
+		}
 		// This is probably the best starting order for all egress IP handlers.
 		// WatchEgressIPPods and WatchEgressIPNamespaces only use the informer
 		// cache to retrieve the egress IPs when determining if namespace/pods
@@ -534,16 +786,19 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 			return err
 		}
 	}
+	if err := cleanupDeprecatedClusterNodeIPsAddressSet(oc.nbClient); err != nil {
+		return err
+	}
 
 	if config.OVNKubernetesFeature.EnableMultiExternalGateway {
 		if err = oc.apbExternalRouteController.Run(oc.wg, 1); err != nil {
 			return err
 		}
-		// If interconnect is enabled and it is a multi-zone setup, then we flush conntrack
-		// on ovnkube-controller side and not on ovnkube-node side, since they are run in the
+		// In a multi-zone setup, flush conntrack on the ovnkube-controller side and not
+		// on the ovnkube-node side, since they are run in the
 		// same process. TODO(tssurya): In upstream ovnk, its possible to run these as different processes
 		// in which case this flushing feature is not supported.
-		if config.OVNKubernetesFeature.EnableInterconnect && oc.zone != types.OvnDefaultZone {
+		if oc.zone != types.OvnDefaultZone {
 			// every minute cleanup stale conntrack entries if any
 			go wait.Until(func() {
 				oc.checkAndDeleteStaleConntrackEntries()
@@ -562,6 +817,16 @@ func (oc *DefaultNetworkController) run(_ context.Context) error {
 			// Until we have scale issues in future let's spawn only one thread
 			oc.nqosController.Run(1, oc.stopChan)
 		}()
+	}
+
+	if util.IsNetworkConnectEnabled() {
+		err := oc.newNetworkConnectController()
+		if err != nil {
+			return fmt.Errorf("unable to create network connect controller, err: %w", err)
+		}
+		if err := oc.networkConnectController.Start(); err != nil {
+			return fmt.Errorf("unable to start network connect controller, err: %w", err)
+		}
 	}
 
 	end := time.Since(start)
@@ -724,10 +989,6 @@ func (h *defaultNetworkControllerEventHandler) RecordErrorEvent(obj interface{},
 		pod := obj.(*corev1.Pod)
 		klog.V(5).Infof("Recording error event on pod %s/%s", pod.Namespace, pod.Name)
 		h.oc.recordPodEvent(reason, err, pod)
-	case factory.NodeType:
-		node := obj.(*corev1.Node)
-		klog.V(5).Infof("Recording error event for node %s", node.Name)
-		h.oc.recordNodeEvent(reason, err, node)
 	}
 }
 
@@ -741,83 +1002,13 @@ func (h *defaultNetworkControllerEventHandler) IsResourceScheduled(obj interface
 // if any, yielded during object creation.
 // Given an object to add and a boolean specifying if the function was executed from iterateRetryResources
 func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, fromRetryLoop bool) error {
-	var err error
-
 	switch h.objType {
 	case factory.PodType:
 		pod, ok := obj.(*corev1.Pod)
 		if !ok {
-			return fmt.Errorf("could not cast %T object to *knet.Pod", obj)
+			return fmt.Errorf("could not cast %T object to *corev1.Pod", obj)
 		}
 		return h.oc.ensurePod(nil, pod, true)
-
-	case factory.NodeType:
-		node, ok := obj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast %T object to *kapi.Node", obj)
-		}
-		if config.HybridOverlay.Enabled {
-			if util.NoHostSubnet(node) {
-				return h.oc.addUpdateHoNodeEvent(node)
-			} else {
-				// clean possible remainings for a node that is used to be a HO node
-				if err := h.oc.deleteHoNodeEvent(node); err != nil {
-					return err
-				}
-			}
-		}
-		var aggregatedErrors []error
-		if h.oc.isLocalZoneNode(node) {
-			var nodeParams *nodeSyncs
-			hoNeedsCleanup := false
-			if !config.HybridOverlay.Enabled {
-				// check if the node has the stale annotations on it to signal that we need to clean up
-				if _, exists := node.Annotations[hotypes.HybridOverlayDRIP]; exists {
-					hoNeedsCleanup = true
-				}
-				if _, exist := node.Annotations[hotypes.HybridOverlayDRMAC]; exist {
-					hoNeedsCleanup = true
-				}
-			}
-			if fromRetryLoop {
-				_, nodeSync := h.oc.addNodeFailed.Load(node.Name)
-				_, clusterRtrSync := h.oc.nodeClusterRouterPortFailed.Load(node.Name)
-				_, mgmtSync := h.oc.mgmtPortFailed.Load(node.Name)
-				_, gwSync := h.oc.gatewaysFailed.Load(node.Name)
-				_, hoSync := h.oc.hybridOverlayFailed.Load(node.Name)
-				_, zoneICSync := h.oc.syncZoneICFailed.Load(node.Name)
-				nodeParams = &nodeSyncs{
-					syncNode:              nodeSync,
-					syncClusterRouterPort: clusterRtrSync,
-					syncMgmtPort:          mgmtSync,
-					syncGw:                gwSync,
-					syncHo:                hoSync || hoNeedsCleanup,
-					syncZoneIC:            zoneICSync}
-			} else {
-				nodeParams = &nodeSyncs{
-					syncNode:              true,
-					syncClusterRouterPort: true,
-					syncMgmtPort:          true,
-					syncGw:                true,
-					syncHo:                config.HybridOverlay.Enabled || hoNeedsCleanup,
-					syncZoneIC:            config.OVNKubernetesFeature.EnableInterconnect}
-			}
-			if err = h.oc.addUpdateLocalNodeEvent(node, nodeParams); err != nil {
-				klog.Infof("Node add failed for %s, will try again later: %v",
-					node.Name, err)
-				aggregatedErrors = append(aggregatedErrors, err)
-			}
-		} else {
-			if err = h.oc.addUpdateRemoteNodeEvent(node, config.OVNKubernetesFeature.EnableInterconnect); err != nil {
-				aggregatedErrors = append(aggregatedErrors, err)
-			}
-		}
-		if err = h.oc.addIPToHostNetworkNamespaceAddrSet(node); err != nil {
-			klog.Errorf("Failed to add node IPs to %s address_set: %v", config.Kubernetes.HostNetworkNamespace, err)
-			h.oc.syncHostNetAddrSetFailed.Store(node.Name, true)
-			aggregatedErrors = append(aggregatedErrors, err)
-		}
-		return utilerrors.Join(aggregatedErrors...)
 
 	case factory.EgressIPType:
 		eIP := obj.(*egressipv1.EgressIP)
@@ -878,7 +1069,7 @@ func (h *defaultNetworkControllerEventHandler) AddResource(obj interface{}, from
 	case factory.NamespaceType:
 		ns, ok := obj.(*corev1.Namespace)
 		if !ok {
-			return fmt.Errorf("could not cast %T object to *kapi.Namespace", obj)
+			return fmt.Errorf("could not cast %T object to *corev1.Namespace", obj)
 		}
 		return h.oc.AddNamespace(ns)
 
@@ -898,137 +1089,6 @@ func (h *defaultNetworkControllerEventHandler) UpdateResource(oldObj, newObj int
 		newPod := newObj.(*corev1.Pod)
 
 		return h.oc.ensurePod(oldPod, newPod, inRetryCache || util.PodScheduled(oldPod) != util.PodScheduled(newPod))
-
-	case factory.NodeType:
-		newNode, ok := newObj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast newObj of type %T to *kapi.Node", newObj)
-		}
-		oldNode, ok := oldObj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast oldObj of type %T to *kapi.Node", oldObj)
-		}
-		var switchToOvnNode bool
-		if config.HybridOverlay.Enabled {
-			if util.NoHostSubnet(newNode) && !util.NoHostSubnet(oldNode) {
-				klog.Infof("Node %s has been updated to be a remote/unmanaged hybrid overlay node", newNode.Name)
-				return h.oc.addUpdateHoNodeEvent(newNode)
-			} else if !util.NoHostSubnet(newNode) && util.NoHostSubnet(oldNode) {
-				klog.Infof("Node %s has been updated to be an ovn-kubernetes managed node", newNode.Name)
-				if err := h.oc.deleteHoNodeEvent(newNode); err != nil {
-					return err
-				}
-				switchToOvnNode = true
-			}
-		}
-
-		// +--------------------+-------------------+-------------------------------------------------+
-		// |    oldNode         |      newNode      |       Action                                    |
-		// |--------------------+-------------------+-------------------------------------------------+
-		// |                    |                   |     Node is remote.                             |
-		// |    local           |      remote       |     Call addUpdateRemoteNodeEvent()             |
-		// |                    |                   |                                                 |
-		// |--------------------+-------------------+-------------------------------------------------+
-		// |                    |                   |     Node is local                               |
-		// |    local           |      local        |     Call addUpdateLocalNodeEvent()              |
-		// |                    |                   |                                                 |
-		// |--------------------+-------------------+-------------------------------------------------+
-		// |                    |                   |     Node is local                               |
-		// |    remote          |      local        |     Call addUpdateLocalNodeEvent(full sync)     |
-		// |                    |                   |                                                 |
-		// |--------------------+-------------------+-------------------------------------------------+
-		// |                    |                   |     Node is remote                              |
-		// |    remote          |      remote       |     Call addUpdateRemoteNodeEvent()             |
-		// |                    |                   |                                                 |
-		// |--------------------+-------------------+-------------------------------------------------+
-		newNodeIsLocalZoneNode := h.oc.isLocalZoneNode(newNode)
-		zoneClusterChanged := h.oc.nodeZoneClusterChanged(oldNode, newNode)
-		nodeSubnetChange := nodeSubnetChanged(oldNode, newNode, types.DefaultNetworkName)
-		nodeEncapIPsChanged := util.NodeEncapIPsChanged(oldNode, newNode)
-		nodePrimaryDPUHostAddrChanged := util.NodePrimaryDPUHostAddrAnnotationChanged(oldNode, newNode)
-
-		var aggregatedErrors []error
-		if newNodeIsLocalZoneNode {
-			var nodeSyncsParam *nodeSyncs
-			if h.oc.isLocalZoneNode(oldNode) {
-				// determine what actually changed in this update
-				_, nodeSync := h.oc.addNodeFailed.Load(newNode.Name)
-				_, failed := h.oc.nodeClusterRouterPortFailed.Load(newNode.Name)
-				clusterRtrSync := failed || nodeChassisChanged(oldNode, newNode) || nodeSubnetChange
-				_, failed = h.oc.mgmtPortFailed.Load(newNode.Name)
-				mgmtSync := failed || nodeSubnetChange
-				_, failed = h.oc.gatewaysFailed.Load(newNode.Name)
-				gwSync := failed || gatewayChanged(oldNode, newNode) || nodeSubnetChange ||
-					hostCIDRsChanged(oldNode, newNode) || nodeGatewayMTUSupportChanged(oldNode, newNode)
-				hoNeedsCleanup := false
-				if !config.HybridOverlay.Enabled {
-					// check if the node has the stale annotations on it to signal that we need to clean up
-					if _, exists := newNode.Annotations[hotypes.HybridOverlayDRIP]; exists {
-						hoNeedsCleanup = true
-					}
-					if _, exist := newNode.Annotations[hotypes.HybridOverlayDRMAC]; exist {
-						hoNeedsCleanup = true
-					}
-				}
-				_, hoSync := h.oc.hybridOverlayFailed.Load(newNode.Name)
-				_, syncZoneIC := h.oc.syncZoneICFailed.Load(newNode.Name)
-				syncZoneIC = syncZoneIC || zoneClusterChanged || primaryAddrChanged(oldNode, newNode)
-				nodeSyncsParam = &nodeSyncs{
-					syncNode:              nodeSync,
-					syncClusterRouterPort: clusterRtrSync,
-					syncMgmtPort:          mgmtSync,
-					syncGw:                gwSync,
-					syncHo:                hoSync || hoNeedsCleanup,
-					syncZoneIC:            syncZoneIC,
-				}
-			} else {
-				klog.Infof("Node %s moved from the remote zone %s to local zone %s, in network: %q",
-					newNode.Name, util.GetNodeZone(oldNode), util.GetNodeZone(newNode), h.oc.GetNetworkName())
-				// The node is now a local zone node.  Trigger a full node sync.
-				nodeSyncsParam = &nodeSyncs{
-					syncNode:              true,
-					syncClusterRouterPort: true,
-					syncMgmtPort:          true,
-					syncGw:                true,
-					syncHo:                true,
-					syncZoneIC:            config.OVNKubernetesFeature.EnableInterconnect}
-			}
-			if err := h.oc.addUpdateLocalNodeEvent(newNode, nodeSyncsParam); err != nil {
-				aggregatedErrors = append(aggregatedErrors, err)
-			}
-		} else {
-			_, syncZoneIC := h.oc.syncZoneICFailed.Load(newNode.Name)
-
-			// Check if the node moved from local zone to remote zone and if so syncZoneIC should be set to true.
-			// Also check if node subnet changed, so static routes are properly set
-			// Also check if the node is used to be a hybrid overlay node
-			syncZoneIC = syncZoneIC || h.oc.isLocalZoneNode(oldNode) || nodeSubnetChange || zoneClusterChanged ||
-				switchToOvnNode || nodeEncapIPsChanged || nodePrimaryDPUHostAddrChanged
-			if syncZoneIC {
-				klog.Infof("Node %q in remote zone %q, network %q, needs interconnect zone sync up. Zone cluster changed: %v",
-					newNode.Name, util.GetNodeZone(newNode), h.oc.GetNetworkName(), zoneClusterChanged)
-			}
-			// Reprovisioning the DPU (including OVS), which is pinned to a host, will change the system ID but not the node.
-			if config.OvnKubeNode.Mode == types.NodeModeDPU && nodeChassisChanged(oldNode, newNode) {
-				if err := h.oc.zoneChassisHandler.DeleteRemoteZoneNode(oldNode); err != nil {
-					aggregatedErrors = append(aggregatedErrors, err)
-				}
-				syncZoneIC = true
-			}
-			if err := h.oc.addUpdateRemoteNodeEvent(newNode, syncZoneIC); err != nil {
-				aggregatedErrors = append(aggregatedErrors, err)
-			}
-		}
-		_, syncHostNetAddrSet := h.oc.syncHostNetAddrSetFailed.Load(newNode.Name)
-		if syncHostNetAddrSet {
-			if err := h.oc.addIPToHostNetworkNamespaceAddrSet(newNode); err != nil {
-				klog.Errorf("Failed to add node IPs to %s address_set: %v", config.Kubernetes.HostNetworkNamespace, err)
-				aggregatedErrors = append(aggregatedErrors, err)
-			} else {
-				h.oc.syncHostNetAddrSetFailed.Delete(newNode.Name)
-			}
-		}
-		return utilerrors.Join(aggregatedErrors...)
 
 	case factory.EgressIPType:
 		oldEIP := oldObj.(*egressipv1.EgressIP)
@@ -1105,13 +1165,6 @@ func (h *defaultNetworkControllerEventHandler) DeleteResource(obj, cachedObj int
 		}
 		return h.oc.removePod(pod, portInfo)
 
-	case factory.NodeType:
-		node, ok := obj.(*corev1.Node)
-		if !ok {
-			return fmt.Errorf("could not cast obj of type %T to *knet.Node", obj)
-		}
-		return h.oc.deleteNodeEvent(node)
-
 	case factory.EgressIPType:
 		eIP := obj.(*egressipv1.EgressIP)
 		return h.oc.eIPC.reconcileEgressIP(eIP, nil)
@@ -1161,9 +1214,6 @@ func (h *defaultNetworkControllerEventHandler) SyncFunc(objs []interface{}) erro
 
 		case factory.PolicyType:
 			syncFunc = h.oc.syncNetworkPolicies
-
-		case factory.NodeType:
-			syncFunc = h.oc.syncNodes
 
 		case factory.EgressIPPodType:
 			syncFunc = h.oc.eIPC.syncEgressIPs

@@ -1,10 +1,14 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cudn
 
-import "github.com/ovn-org/ovn-kubernetes/test/e2e/testscenario"
+import "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/testscenario"
 
 var EVPNCUDNValid = []testscenario.ValidateCRScenario{
 	{
 		Description: "valid Layer2 Primary EVPN with macVRF",
+		Name:        "l2-evpn-primary",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -26,6 +30,7 @@ spec:
 	},
 	{
 		Description: "valid Layer2 Primary EVPN with macVRF and routeTarget",
+		Name:        "l2-evpn-with-rt",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -48,6 +53,7 @@ spec:
 	},
 	{
 		Description: "valid Layer2 Primary EVPN with both macVRF and ipVRF",
+		Name:        "l2-evpn-mac-ip-vrf",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -71,6 +77,7 @@ spec:
 	},
 	{
 		Description: "valid Layer3 Primary EVPN with ipVRF",
+		Name:        "l3-evpn-primary",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -94,6 +101,7 @@ spec:
 	},
 	{
 		Description: "valid Layer3 Primary EVPN with ipVRF and routeTarget",
+		Name:        "l3-evpn-with-rt",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -118,6 +126,7 @@ spec:
 	},
 	{
 		Description: "valid Layer2 Primary EVPN dual-stack",
+		Name:        "l2-evpn-dual-stack",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -139,6 +148,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with max VNI value",
+		Name:        "evpn-max-vni",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -160,6 +170,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with 4-byte ASN in routeTarget (2-byte local admin)",
+		Name:        "evpn-4byte-asn",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -182,6 +193,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with 2-byte ASN and 4-byte local admin",
+		Name:        "evpn-2byte-asn-4byte-local",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -204,6 +216,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with IPv4 address format routeTarget",
+		Name:        "evpn-ipv4-rt",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -226,6 +239,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with wildcard AS routeTarget",
+		Name:        "evpn-wildcard-rt",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -248,6 +262,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with wildcard AS and large local admin",
+		Name:        "evpn-wildcard-large-local",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -270,6 +285,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with AS=0 (FRR allows)",
+		Name:        "evpn-as-zero",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -292,6 +308,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with local admin=0 (FRR allows)",
+		Name:        "evpn-local-zero",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -314,6 +331,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with wildcard and local admin=0 (FRR allows)",
+		Name:        "evpn-wildcard-zero",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -336,6 +354,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with max 2-byte AS boundary (65535)",
+		Name:        "evpn-2byte-as-max",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -358,6 +377,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with min 4-byte AS boundary (65536)",
+		Name:        "evpn-4byte-as-min",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -380,6 +400,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with max local admin for 2-byte AS (4294967295)",
+		Name:        "evpn-2byte-as-max-local",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
@@ -402,6 +423,7 @@ spec:
 	},
 	{
 		Description: "valid EVPN with max length routeTarget (21 chars: 255.255.255.255:65535)",
+		Name:        "evpn-max-length-rt",
 		Manifest: `
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork

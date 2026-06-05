@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package topology
 
 import (
@@ -7,13 +10,13 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -88,13 +91,114 @@ var _ = Describe("Topology factory", func() {
 				ovntypes.TopologyExternalID: ovntypes.Layer3Topology,
 				"k8s-cluster-router":        "yes",
 			}
-			expectedOptions := map[string]string{"mcast_relay": "true"}
+			expectedOptions := map[string]string{"mcast_relay": "true", "always_learn_from_arp_request": "false"}
 			Expect(clusterRouter).To(
 				WithTransform(
 					removeUUID,
 					Equal(
 						expectedClusterRouter(routerName, coopUUID, expectedOptions, expectedExternalIDs),
 					),
+				),
+			)
+		})
+
+		It("sets ct-commit-all on local gateway UDN cluster routers", func() {
+			config.Gateway.Mode = config.GatewayModeLocal
+			DeferCleanup(func() {
+				Expect(config.PrepareTestConfig()).To(Succeed())
+			})
+
+			clusterRouterName := netInfo.GetNetworkScopedClusterRouterName()
+			clusterRouter, err := factory.NewClusterRouter(clusterRouterName, netInfo, coopUUID)
+			Expect(err).NotTo(HaveOccurred())
+			expectedExternalIDs := map[string]string{
+				ovntypes.NetworkExternalID:  networkName,
+				ovntypes.TopologyExternalID: ovntypes.Layer3Topology,
+				"k8s-cluster-router":        "yes",
+			}
+			expectedOptions := map[string]string{
+				"always_learn_from_arp_request": "false",
+				"ct-commit-all":                 "true",
+			}
+			Expect(clusterRouter).To(
+				WithTransform(
+					removeUUID,
+					Equal(
+						expectedClusterRouter(clusterRouterName, coopUUID, expectedOptions, expectedExternalIDs),
+					),
+				),
+			)
+		})
+
+		It("sets ct-commit-all on local gateway layer2 UDN transit routers", func() {
+			config.Gateway.Mode = config.GatewayModeLocal
+			DeferCleanup(func() {
+				Expect(config.PrepareTestConfig()).To(Succeed())
+			})
+
+			layer2NetInfo, err := util.NewNetInfo(newLayer2PrimaryNetworkConf(networkName, networkSubnets))
+			Expect(err).NotTo(HaveOccurred())
+			clusterRouterName := layer2NetInfo.GetNetworkScopedClusterRouterName()
+			clusterRouter, err := factory.NewTransitRouter(clusterRouterName, layer2NetInfo, coopUUID, "42")
+			Expect(err).NotTo(HaveOccurred())
+			expectedExternalIDs := map[string]string{
+				ovntypes.NetworkExternalID:  networkName,
+				ovntypes.TopologyExternalID: ovntypes.Layer2Topology,
+				"k8s-cluster-router":        "yes",
+			}
+			expectedOptions := map[string]string{
+				libovsdbops.RequestedTnlKey: "42",
+				"ct-commit-all":             "true",
+			}
+			Expect(clusterRouter).To(
+				WithTransform(
+					removeUUID,
+					Equal(
+						expectedClusterRouter(clusterRouterName, coopUUID, expectedOptions, expectedExternalIDs),
+					),
+				),
+			)
+		})
+
+		It("does not set ct-commit-all on shared gateway UDN cluster routers", func() {
+			config.Gateway.Mode = config.GatewayModeShared
+			DeferCleanup(func() {
+				Expect(config.PrepareTestConfig()).To(Succeed())
+			})
+			clusterRouterName := netInfo.GetNetworkScopedClusterRouterName()
+			clusterRouter, err := factory.NewClusterRouter(clusterRouterName, netInfo, coopUUID)
+			Expect(err).NotTo(HaveOccurred())
+			expectedExternalIDs := map[string]string{
+				ovntypes.NetworkExternalID:  networkName,
+				ovntypes.TopologyExternalID: ovntypes.Layer3Topology,
+				"k8s-cluster-router":        "yes",
+			}
+			expectedOptions := map[string]string{"always_learn_from_arp_request": "false"}
+			Expect(clusterRouter).To(
+				WithTransform(
+					removeUUID,
+					Equal(
+						expectedClusterRouter(clusterRouterName, coopUUID, expectedOptions, expectedExternalIDs),
+					),
+				),
+			)
+		})
+
+		It("does not set ct-commit-all on default network cluster routers", func() {
+			config.Gateway.Mode = config.GatewayModeLocal
+			DeferCleanup(func() {
+				Expect(config.PrepareTestConfig()).To(Succeed())
+			})
+
+			defaultNetInfo := &util.DefaultNetInfo{}
+			clusterRouter, err := factory.NewClusterRouter(defaultNetInfo.GetNetworkScopedClusterRouterName(), defaultNetInfo, coopUUID)
+			Expect(err).NotTo(HaveOccurred())
+			expectedExternalIDs := map[string]string{"k8s-cluster-router": "yes"}
+			expectedOptions := map[string]string{"always_learn_from_arp_request": "false"}
+			Expect(clusterRouter).To(
+				WithTransform(
+					removeUUID,
+					Equal(expectedClusterRouter(ovntypes.OVNClusterRouter, coopUUID, expectedOptions, expectedExternalIDs)),
 				),
 			)
 		})
@@ -180,6 +284,15 @@ func newLayer3PrimaryNetworkConf(name, subnets string) *ovncnitypes.NetConf {
 	return &ovncnitypes.NetConf{
 		NetConf:  cnitypes.NetConf{Name: name},
 		Topology: ovntypes.Layer3Topology,
+		Subnets:  subnets,
+		Role:     ovntypes.NetworkRolePrimary,
+	}
+}
+
+func newLayer2PrimaryNetworkConf(name, subnets string) *ovncnitypes.NetConf {
+	return &ovncnitypes.NetConf{
+		NetConf:  cnitypes.NetConf{Name: name},
+		Topology: ovntypes.Layer2Topology,
 		Subnets:  subnets,
 		Role:     ovntypes.NetworkRolePrimary,
 	}

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package v1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -6,7 +9,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 //
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
-// +kubebuilder:resource:path=userdefinednetworks,scope=Namespaced
+// +kubebuilder:resource:path=userdefinednetworks,scope=Namespaced,shortName=udn
 // +kubebuilder:singular=userdefinednetwork
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
@@ -14,7 +17,6 @@ type UserDefinedNetwork struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="Spec is immutable"
 	// +kubebuilder:validation:XValidation:rule="has(self.topology) && self.topology == 'Layer3' ? has(self.layer3): !has(self.layer3)", message="spec.layer3 is required when topology is Layer3 and forbidden otherwise"
 	// +kubebuilder:validation:XValidation:rule="has(self.topology) && self.topology == 'Layer2' ? has(self.layer2): !has(self.layer2)", message="spec.layer2 is required when topology is Layer2 and forbidden otherwise"
 	// +required
@@ -34,6 +36,7 @@ type UserDefinedNetworkSpec struct {
 	//
 	// +kubebuilder:validation:Enum=Layer2;Layer3
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="Topology is immutable"
 	// +required
 	// +unionDiscriminator
 	Topology NetworkTopology `json:"topology"`
@@ -43,6 +46,7 @@ type UserDefinedNetworkSpec struct {
 	Layer3 *Layer3Config `json:"layer3,omitempty"`
 
 	// Layer2 is the Layer2 topology configuration.
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="Layer2 is immutable"
 	// +optional
 	Layer2 *Layer2Config `json:"layer2,omitempty"`
 }

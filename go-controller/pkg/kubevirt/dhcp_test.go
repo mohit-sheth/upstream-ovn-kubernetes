@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package kubevirt
 
 import (
@@ -5,7 +8,7 @@ import (
 
 	ktypes "k8s.io/apimachinery/pkg/types"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"

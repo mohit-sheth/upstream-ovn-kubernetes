@@ -10,18 +10,17 @@ Each new release of OVN-Kubernetes is defined with a "version" that represents t
     * `ovn-k8s-cni-overlay`: is the cni executable to be placed in /opt/cni/bin (or another directory in which kubernetes will look for the plugin) so that it can be invoked for each pod event by kubernetes
     * `hybrid-overlay-node`
     * `ovn-kube-util`: contains the Utils for ovn-kubernetes
-    * `ovndbchecker`
     * `ovnkube-trace`: is the binary that contains ovnkube-trace which is an abstraction used to invoke OVN/OVS packet tracing utils
     * `ovnkube-identity`: is the executable that is invoked to run ovn-kubernetes identity manager, which includes the admission webhook and the CertificateSigningRequest approver
 * `ovnkube` API configuration 
 * scripts used to deploy OVN-Kubernetes including helm charts
-* Images for [fedora](https://github.com/ovn-org/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-fedora) and [ubuntu](https://github.com/ovn-org/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-ubuntu)
+* Images for [fedora](https://github.com/ovn-kubernetes/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-fedora) and [ubuntu](https://github.com/ovn-kubernetes/ovn-kubernetes/pkgs/container/ovn-kubernetes%2Fovn-kube-ubuntu)
 
 ## Release Planning
 
-* OVN-Kubernetes projects uses [milestones](https://github.com/ovn-org/ovn-kubernetes/milestones) to track our release planning
+* OVN-Kubernetes projects uses [milestones](https://github.com/ovn-kubernetes/ovn-kubernetes/milestones) to track our release planning
 * All PRs and Issues must be tagged with the correct milestone so that it get's included in the release planning
-* Please check our [roadmap](https://github.com/orgs/ovn-org/projects/5/views/4) for more details on our release tracking process
+* Please check our [roadmap](https://github.com/orgs/ovn-kubernetes/projects/5/views/4) for more details on our release tracking process
 
 ## Release Cadence
 
@@ -36,12 +35,12 @@ Each new release of OVN-Kubernetes is defined with a "version" that represents t
 
 ## Release Process
 
-* You can find our current releases [here](https://github.com/ovn-org/ovn-kubernetes/releases).
+* You can find our current releases [here](https://github.com/ovn-kubernetes/ovn-kubernetes/releases).
 * Every major release cut will be preceded by an alpha prerelease and beta prerelease.
-* See [sample release PR](https://github.com/ovn-org/ovn-kubernetes/pull/4333) which
+* See [sample release PR](https://github.com/ovn-kubernetes/ovn-kubernetes/pull/4333) which
   will become the head commit for a given release.
 * Branch will be cut on the day of release once the release PR merges.
-* CI-CD for the release branch will be added to the [GitHub Workflow](https://github.com/ovn-org/ovn-kubernetes/blob/master/.github/workflows/test.yml#L6).
+* CI-CD for the release branch will be added to the [GitHub Workflow](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/master/.github/workflows/test.yml#L6).
 
 ## BackPort Request
 
@@ -52,5 +51,6 @@ Each new release of OVN-Kubernetes is defined with a "version" that represents t
 ## Information on Past Releases
 
 * [v1.0.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.0) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.0.0) - not maintained anymore.
-* [v1.1.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.1) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.1.0) - actively maintained
+* [v1.1.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.1) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.1.0) - not maintained anymore.
 * [v1.2.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.2) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.2.0) - actively maintained
+* [v1.3.0](https://github.com/ovn-kubernetes/ovn-kubernetes/tree/release-1.3) - [release-notes](https://github.com/ovn-kubernetes/ovn-kubernetes/releases/tag/v1.3.0) - actively maintained

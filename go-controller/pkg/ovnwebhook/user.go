@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovnwebhook
 
 import (
@@ -5,7 +8,7 @@ import (
 
 	authenticationv1 "k8s.io/api/authentication/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/csrapprover"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/csrapprover"
 )
 
 // checkNodeIdentity retrieves user name from UserInfo, based on given podAdmissions.

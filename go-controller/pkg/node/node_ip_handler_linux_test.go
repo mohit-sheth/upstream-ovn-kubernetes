@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -18,19 +21,37 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
-	nodenft "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/nftables"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	mgmtportmock "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/managementport"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	mgmtportmock "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/managementport"
+	netlink_mocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilMocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/mocks"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/vswitchd"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// newTestOVSClient starts an in-memory OVSDB harness seeded with an empty
+// Open_vSwitch root row so tests that wire an addressManager have a real
+// libovsdb client. Mirrors the pattern used in pkg/metrics/ovs_test.go.
+func newTestOVSClient() (libovsdbclient.Client, *libovsdbtest.Context) {
+	client, ctx, err := libovsdbtest.NewOVSTestHarness(libovsdbtest.TestSetup{
+		OVSData: []libovsdbtest.TestData{
+			&vswitchd.OpenvSwitch{UUID: "root-ovs"},
+		},
+	})
+	Expect(err).NotTo(HaveOccurred())
+	return client, ctx
+}
 
 func ipEvent(ipStr string, isAdd bool, addrChan chan netlink.AddrUpdate) *net.IPNet {
 	ipNet := ovntest.MustParseIPNet(ipStr)
@@ -60,6 +81,7 @@ type testCtx struct {
 	mgmtPortIP4  *net.IPNet
 	mgmtPortIP6  *net.IPNet
 	subscribed   uint32
+	ovsCleanup   *libovsdbtest.Context
 }
 
 var _ = Describe("Node IP Handler event tests", func() {
@@ -78,10 +100,6 @@ var _ = Describe("Node IP Handler event tests", func() {
 		// Restore global default values before each testcase
 		Expect(config.PrepareTestConfig()).To(Succeed())
 		fexec := ovntest.NewFakeExec()
-		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-			Cmd:    "ovs-vsctl --timeout=15 get Open_vSwitch . external_ids:ovn-encap-ip",
-			Output: "10.1.1.10",
-		})
 		Expect(util.SetExec(fexec)).ShouldNot(HaveOccurred())
 		useNetlink := false
 		tc = configureKubeOVNContext(nodeName, useNetlink)
@@ -109,6 +127,7 @@ var _ = Describe("Node IP Handler event tests", func() {
 		close(tc.stopCh)
 		tc.doneWg.Wait()
 		tc.watchFactory.Shutdown()
+		tc.ovsCleanup.Cleanup()
 		close(tc.addrChan)
 		util.ResetRunner()
 	})
@@ -145,6 +164,62 @@ var _ = Describe("Node IP Handler event tests", func() {
 				}
 			})
 		})
+
+		Context("by adding and removing a masquerade IP", func() {
+			It("should trigger OnMasqueradeIPChanged callback", func() {
+				var masqueradeCallCount atomic.Int32
+				tc.ipManager.OnMasqueradeIPChanged = func() {
+					masqueradeCallCount.Add(1)
+				}
+
+				masqAddr := config.Gateway.MasqueradeIPs.V4HostMasqueradeIP.String() + "/29"
+				ipEvent(masqAddr, true, tc.addrChan)
+				Eventually(func() int32 {
+					return masqueradeCallCount.Load()
+				}, 5).Should(Equal(int32(1)))
+
+				ipEvent(masqAddr, false, tc.addrChan)
+				Eventually(func() int32 {
+					return masqueradeCallCount.Load()
+				}, 5).Should(Equal(int32(2)))
+			})
+
+			It("should not update node annotations for masquerade IPs", func() {
+				masqAddr := config.Gateway.MasqueradeIPs.V4HostMasqueradeIP.String() + "/29"
+				ipNet := ipEvent(masqAddr, true, tc.addrChan)
+				Consistently(func() bool {
+					return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+				}, 3).Should(BeFalse())
+			})
+		})
+
+		Context("when receiving an event with nil IP", func() {
+			It("should not panic and should not trigger masquerade or address change callbacks", func() {
+				var changedCount atomic.Int32
+				var masqueradeCount atomic.Int32
+				tc.ipManager.AddOnAddressesChangedHandler(func() {
+					changedCount.Add(1)
+				})
+				tc.ipManager.OnMasqueradeIPChanged = func() {
+					masqueradeCount.Add(1)
+				}
+
+				tc.addrChan <- netlink.AddrUpdate{
+					LinkAddress: net.IPNet{},
+					NewAddr:     true,
+				}
+
+				Consistently(func() int32 {
+					return changedCount.Load() + masqueradeCount.Load()
+				}, 3).Should(Equal(int32(0)))
+
+				// Confirm normal events still work after nil IP event
+				ipNet := ipEvent(nodeAddr4, true, tc.addrChan)
+				Eventually(func() bool {
+					return nodeHasAddress(tc.fakeClient, nodeName, ipNet)
+				}, 5).Should(BeTrue())
+			})
+		})
 	})
 
 	Describe("Subscription errors", func() {
@@ -170,6 +245,310 @@ var _ = Describe("Node IP Handler event tests", func() {
 	})
 })
 
+var _ = Describe("Node IP Handler DPUHost event filtering", func() {
+	var tc *testCtx
+
+	const (
+		nodeName     = "node1"
+		gwIfIndex    = 42
+		otherIfIndex = 99
+		someAddr     = "192.168.1.50/24"
+	)
+
+	BeforeEach(func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.OvnKubeNode.Mode = ovntypes.NodeModeDPUHost
+		fexec := ovntest.NewFakeExec()
+		Expect(util.SetExec(fexec)).ShouldNot(HaveOccurred())
+		tc = configureKubeOVNContext(nodeName, false)
+		tc.ipManager.gatewayIfIndex = gwIfIndex
+
+		subscribe := func() (bool, chan netlink.AddrUpdate, error) {
+			defer atomic.StoreUint32(&tc.subscribed, 1)
+			tc.addrChan = make(chan netlink.AddrUpdate)
+			return true, tc.addrChan, nil
+		}
+		tc.doneWg.Add(1)
+		go func() {
+			tc.ipManager.runInternal(tc.stopCh, subscribe)
+			tc.doneWg.Done()
+		}()
+		Eventually(func() bool {
+			return atomic.LoadUint32(&tc.subscribed) == 1
+		}, 5).Should(BeTrue())
+	})
+
+	AfterEach(func() {
+		close(tc.stopCh)
+		tc.doneWg.Wait()
+		tc.watchFactory.Shutdown()
+		tc.ovsCleanup.Cleanup()
+		close(tc.addrChan)
+		util.ResetRunner()
+	})
+
+	It("triggers masquerade reconciliation for events on the gateway interface", func() {
+		var masqueradeCount atomic.Int32
+		tc.ipManager.OnMasqueradeIPChanged = func() {
+			masqueradeCount.Add(1)
+		}
+
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   gwIfIndex,
+			NewAddr:     true,
+		}
+		Eventually(func() int32 {
+			return masqueradeCount.Load()
+		}, 5).Should(Equal(int32(1)))
+	})
+
+	It("does not trigger masquerade reconciliation for events on other interfaces", func() {
+		var masqueradeCount atomic.Int32
+		tc.ipManager.OnMasqueradeIPChanged = func() {
+			masqueradeCount.Add(1)
+		}
+
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   otherIfIndex,
+			NewAddr:     true,
+		}
+		Consistently(func() int32 {
+			return masqueradeCount.Load()
+		}, 3).Should(Equal(int32(0)))
+	})
+
+	It("does not trigger masquerade reconciliation when gateway index is unresolved", func() {
+		var masqueradeCount atomic.Int32
+		tc.ipManager.OnMasqueradeIPChanged = func() {
+			masqueradeCount.Add(1)
+		}
+		tc.ipManager.gatewayIfIndex = 0
+
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   gwIfIndex,
+			NewAddr:     true,
+		}
+		Consistently(func() int32 {
+			return masqueradeCount.Load()
+		}, 3).Should(Equal(int32(0)))
+	})
+
+	It("skips regular address processing for all events", func() {
+		tc.addrChan <- netlink.AddrUpdate{
+			LinkAddress: *ovntest.MustParseIPNet(someAddr),
+			LinkIndex:   otherIfIndex,
+			NewAddr:     true,
+		}
+		Consistently(func() bool {
+			return nodeHasAddress(tc.fakeClient, nodeName, ovntest.MustParseIPNet(someAddr))
+		}, 3).Should(BeFalse())
+	})
+})
+
+var _ = Describe("addressManager.updateOVNEncapIPAndReconnect", func() {
+	const ovnAppctlExitRestart = "ovn-appctl --timeout=5 -t ovn-controller exit --restart"
+
+	var (
+		fexec      *ovntest.FakeExec
+		ovsClient  libovsdbclient.Client
+		ovsCleanup *libovsdbtest.Context
+	)
+
+	BeforeEach(func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		fexec = ovntest.NewFakeExec()
+		Expect(util.SetExec(fexec)).To(Succeed())
+		Expect(util.SetupMockOVSPidFile()).To(Succeed())
+	})
+
+	AfterEach(func() {
+		if ovsCleanup != nil {
+			ovsCleanup.Cleanup()
+		}
+		util.ResetRunner()
+	})
+
+	// startHarness seeds the singleton Open_vSwitch row's external_ids with
+	// the given pairs (nil for none) and returns an addressManager wired with
+	// the libovsdb client and a real NodeAnnotator backed by a fake kube
+	// client — both are reached by the function under test.
+	const harnessNodeName = "node1"
+	startHarness := func(initial map[string]string) *addressManager {
+		client, ctx, err := libovsdbtest.NewOVSTestHarness(libovsdbtest.TestSetup{
+			OVSData: []libovsdbtest.TestData{
+				&vswitchd.OpenvSwitch{UUID: "root-ovs", ExternalIDs: initial},
+			},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		ovsClient = client
+		ovsCleanup = ctx
+		fakeClient := fake.NewSimpleClientset(&corev1.Node{
+			ObjectMeta: metav1.ObjectMeta{Name: harnessNodeName},
+		})
+		k := &kube.Kube{KClient: fakeClient}
+		return &addressManager{
+			nodeName:      harnessNodeName,
+			ovsClient:     ovsClient,
+			nodeAnnotator: kube.NewNodeAnnotator(k, harnessNodeName),
+		}
+	}
+
+	currentEncapIP := func() string {
+		got := []*vswitchd.OpenvSwitch{}
+		Expect(ovsClient.List(context.Background(), &got)).To(Succeed())
+		Expect(got).To(HaveLen(1))
+		return got[0].ExternalIDs["ovn-encap-ip"]
+	}
+
+	ovntest.OnSupportedPlatformsIt("is a no-op when the encap IP is already configured", func() {
+		am := startHarness(map[string]string{"ovn-encap-ip": "10.1.1.10"})
+		// fexec has no expectations; if ovn-appctl runs, it fails the test.
+		am.updateOVNEncapIPAndReconnect(net.ParseIP("10.1.1.10"))
+		Expect(currentEncapIP()).To(Equal("10.1.1.10"))
+		Expect(fexec.CalledMatchesExpected()).To(BeTrue())
+	})
+
+	ovntest.OnSupportedPlatformsIt("writes the encap IP and restarts ovn-controller when it differs", func() {
+		am := startHarness(map[string]string{"ovn-encap-ip": "10.1.1.10"})
+		fexec.AddFakeCmdsNoOutputNoError([]string{ovnAppctlExitRestart})
+		am.updateOVNEncapIPAndReconnect(net.ParseIP("10.1.1.20"))
+		Expect(currentEncapIP()).To(Equal("10.1.1.20"))
+		Expect(config.Default.EffectiveEncapIP).To(Equal("10.1.1.20"))
+		Expect(fexec.CalledMatchesExpected()).To(BeTrue())
+	})
+
+	ovntest.OnSupportedPlatformsIt("writes the encap IP when no prior value exists", func() {
+		am := startHarness(nil)
+		fexec.AddFakeCmdsNoOutputNoError([]string{ovnAppctlExitRestart})
+		am.updateOVNEncapIPAndReconnect(net.ParseIP("10.1.1.10"))
+		Expect(currentEncapIP()).To(Equal("10.1.1.10"))
+		Expect(fexec.CalledMatchesExpected()).To(BeTrue())
+	})
+
+	ovntest.OnSupportedPlatformsIt("preserves unrelated external_ids while updating the encap IP", func() {
+		am := startHarness(map[string]string{
+			"ovn-encap-ip": "10.1.1.10",
+			"system-id":    "node-a",
+		})
+		fexec.AddFakeCmdsNoOutputNoError([]string{ovnAppctlExitRestart})
+		am.updateOVNEncapIPAndReconnect(net.ParseIP("10.1.1.20"))
+
+		got := []*vswitchd.OpenvSwitch{}
+		Expect(ovsClient.List(context.Background(), &got)).To(Succeed())
+		Expect(got[0].ExternalIDs).To(Equal(map[string]string{
+			"ovn-encap-ip": "10.1.1.20",
+			"system-id":    "node-a",
+		}))
+	})
+})
+
+var _ = Describe("refreshGatewayIfIndex", func() {
+	const nodeName = "node1"
+
+	It("does nothing when Gateway.Interface is empty", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.Gateway.Interface = ""
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+		defer tc.ovsCleanup.Cleanup()
+
+		tc.ipManager.gatewayIfIndex = 42
+		tc.ipManager.refreshGatewayIfIndex()
+		Expect(tc.ipManager.gatewayIfIndex).To(Equal(42))
+	})
+
+	It("resets index to 0 when interface is not found", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.Gateway.Interface = "nonexistent0"
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+		defer tc.ovsCleanup.Cleanup()
+
+		nlMock := new(utilMocks.NetLinkOps)
+		util.SetNetLinkOpMockInst(nlMock)
+		defer util.ResetNetLinkOpMockInst()
+
+		nlMock.On("LinkByName", "nonexistent0").Return(nil, fmt.Errorf("not found"))
+
+		tc.ipManager.gatewayIfIndex = 42
+		tc.ipManager.refreshGatewayIfIndex()
+		Expect(tc.ipManager.gatewayIfIndex).To(Equal(0))
+	})
+
+	It("sets index from link when interface exists", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		config.Gateway.Interface = "breth0"
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+		defer tc.ovsCleanup.Cleanup()
+
+		nlMock := new(utilMocks.NetLinkOps)
+		linkMock := new(netlink_mocks.Link)
+		util.SetNetLinkOpMockInst(nlMock)
+		defer util.ResetNetLinkOpMockInst()
+
+		nlMock.On("LinkByName", "breth0").Return(linkMock, nil)
+		linkMock.On("Attrs").Return(&netlink.LinkAttrs{Index: 77, Name: "breth0"})
+
+		tc.ipManager.gatewayIfIndex = 0
+		tc.ipManager.refreshGatewayIfIndex()
+		Expect(tc.ipManager.gatewayIfIndex).To(Equal(77))
+	})
+})
+
+var _ = Describe("Node IP Handler helper tests", func() {
+	const nodeName = "node1"
+
+	It("removes cached IPs even when they are no longer valid node IPs", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+		defer tc.ovsCleanup.Cleanup()
+
+		tc.ipManager.Lock()
+		tc.ipManager.cidrs.Insert(tc.mgmtPortIP4.String())
+		tc.ipManager.Unlock()
+
+		Expect(tc.ipManager.delAddr(*tc.mgmtPortIP4)).To(BeTrue())
+		_, networks := tc.ipManager.ListAddresses()
+		Expect(networks).To(BeEmpty())
+	})
+
+	It("syncs stale host-cidrs when egress IP annotations change", func() {
+		Expect(config.PrepareTestConfig()).To(Succeed())
+		tc := configureKubeOVNContext(nodeName, false)
+		defer tc.watchFactory.Shutdown()
+		defer tc.ovsCleanup.Cleanup()
+
+		tc.ipManager.addHandlerForAddrChange()
+
+		staleEIP := "2001:db8:abcd:1234:c001::"
+		node, err := tc.fakeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		nodeToUpdate := node.DeepCopy()
+		nodeToUpdate.Annotations[util.OVNNodeHostCIDRs] = fmt.Sprintf("[\"%s\", \"%s\", \"%s/128\"]", "10.1.1.10/24", "2001:db8::10/64", staleEIP)
+		nodeToUpdate.Annotations[util.OVNNodeSecondaryHostEgressIPs] = fmt.Sprintf("[\"%s\"]", staleEIP)
+		_, err = tc.fakeClient.CoreV1().Nodes().Update(context.TODO(), nodeToUpdate, metav1.UpdateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+
+		Eventually(func() bool {
+			updatedNode, err := tc.fakeClient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			hostIPs, err := util.ParseNodeHostCIDRsDropNetMask(updatedNode)
+			if err != nil {
+				return false
+			}
+			return !hostIPs.Has(staleEIP)
+		}, 5).Should(BeTrue())
+	})
+})
+
 var _ = Describe("Node IP Handler tests", func() {
 	// To ensure that variables don't leak between parallel Ginkgo specs,
 	// put all test context into a single struct and reference it via
@@ -191,10 +570,6 @@ var _ = Describe("Node IP Handler tests", func() {
 
 	BeforeEach(func() {
 		fexec := ovntest.NewFakeExec()
-		fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-			Cmd:    "ovs-vsctl --timeout=15 get Open_vSwitch . external_ids:ovn-encap-ip",
-			Output: dummyBrInternalIPv4,
-		})
 		Expect(util.SetExec(fexec)).ShouldNot(HaveOccurred())
 		// Restore global default values before each testcase
 		Expect(config.PrepareTestConfig()).To(Succeed())
@@ -208,6 +583,7 @@ var _ = Describe("Node IP Handler tests", func() {
 		close(tc.stopCh)
 		tc.doneWg.Wait()
 		tc.watchFactory.Shutdown()
+		tc.ovsCleanup.Cleanup()
 		Expect(tc.ns.Close()).ShouldNot(HaveOccurred())
 		util.ResetRunner()
 	})
@@ -397,14 +773,19 @@ func configureKubeOVNContext(nodeName string, useNetlink bool) *testCtx {
 	err = tc.watchFactory.Start()
 	Expect(err).NotTo(HaveOccurred())
 
-	_ = nodenft.SetFakeNFTablesHelper()
-
 	mpmock := &mgmtportmock.Interface{}
 	mpmock.On("GetAddresses").Return([]*net.IPNet{tc.mgmtPortIP4, tc.mgmtPortIP6})
 
 	fakeBridgeConfiguration := bridgeconfig.TestBridgeConfig("breth0")
 
+	// Skip the encap-update path inside addressManager.sync() — these tests
+	// don't fake ovn-appctl and aren't exercising encap reconciliation.
+	config.Default.EncapIP = "test-encap-ip"
+
+	ovsClient, ovsCleanup := newTestOVSClient()
+	tc.ovsCleanup = ovsCleanup
+
 	k := &kube.Kube{KClient: tc.fakeClient}
-	tc.ipManager = newAddressManagerInternal(nodeName, k, mpmock, tc.watchFactory, fakeBridgeConfiguration, useNetlink)
+	tc.ipManager = newAddressManagerInternal(nodeName, k, mpmock, tc.watchFactory, fakeBridgeConfiguration, ovsClient, useNetlink)
 	return tc
 }

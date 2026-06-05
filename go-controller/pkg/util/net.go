@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -7,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -208,6 +212,18 @@ func MatchFirstIPFamily(isIPv6 bool, ips []net.IP) (net.IP, error) {
 	return nil, fmt.Errorf("no %s IP available", IPFamilyName(isIPv6))
 }
 
+func SplitIPsByIPFamily(ips []net.IP) (ipsv4, ipsv6 []net.IP) {
+	for _, ip := range ips {
+		switch {
+		case utilnet.IsIPv6(ip):
+			ipsv6 = append(ipsv6, ip)
+		default:
+			ipsv4 = append(ipsv4, ip)
+		}
+	}
+	return
+}
+
 // MatchFirstIPNetFamily loops through the array of ipnets and returns the
 // first entry in the list in the same IP Family, based on input flag isIPv6.
 func MatchFirstIPNetFamily(isIPv6 bool, ipnets []*net.IPNet) (*net.IPNet, error) {
@@ -231,6 +247,18 @@ func MatchAllIPNetFamily(isIPv6 bool, ipnets []*net.IPNet) []*net.IPNet {
 	return ret
 }
 
+func SplitIPNetsByIPFamily(ipnets []*net.IPNet) (ipv4, ipv6 []*net.IPNet) {
+	for _, ipnet := range ipnets {
+		switch {
+		case utilnet.IsIPv6CIDR(ipnet):
+			ipv6 = append(ipv6, ipnet)
+		default:
+			ipv4 = append(ipv4, ipnet)
+		}
+	}
+	return
+}
+
 // MatchIPStringFamily loops through the array of string and returns the
 // first entry in the list in the same IP Family, based on input flag isIPv6.
 func MatchIPStringFamily(isIPv6 bool, ipStrings []string) (string, error) {
@@ -240,6 +268,18 @@ func MatchIPStringFamily(isIPv6 bool, ipStrings []string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no %s string available", IPFamilyName(isIPv6))
+}
+
+// MatchFirstCIDRStringFamily loops through the array of CIDR strings and returns
+// the first entry in the same IP Family, based on input flag isIPv6.
+func MatchFirstCIDRStringFamily[T ~string](isIPv6 bool, cidrs []T) T {
+	for _, cidr := range cidrs {
+		if utilnet.IsIPv6CIDRString(string(cidr)) == isIPv6 {
+			return cidr
+		}
+	}
+	var zero T
+	return zero
 }
 
 // MatchAllIPStringFamily loops through the array of string and returns a slice
@@ -267,6 +307,16 @@ func MatchAllIPNetsStringFamily(isIPv6 bool, ipnets []string) []string {
 		}
 	}
 	return out
+}
+
+// IsIPContainedInAnyCIDR returns true if ip is contained in any of the given ipnets
+func IsIPContainedInAnyCIDR(ip net.IP, ipnets ...*net.IPNet) bool {
+	for _, ipnet := range ipnets {
+		if ipnet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsContainedInAnyCIDR returns true if ipnet is contained in any of ipnets
@@ -298,10 +348,10 @@ func IPNetOverlaps(ref *net.IPNet, ipnets ...*net.IPNet) []*net.IPNet {
 }
 
 // ParseIPNets parses the provided string formatted CIDRs
-func ParseIPNets(strs []string) ([]*net.IPNet, error) {
+func ParseIPNets[T ~string](strs []T) ([]*net.IPNet, error) {
 	ipnets := make([]*net.IPNet, len(strs))
 	for i := range strs {
-		ip, ipnet, err := utilnet.ParseCIDRSloppy(strs[i])
+		ip, ipnet, err := utilnet.ParseCIDRSloppy(string(strs[i]))
 		if err != nil {
 			return nil, err
 		}
@@ -329,10 +379,52 @@ func GenerateRandMAC() (net.HardwareAddr, error) {
 func CopyIPNets(ipnets []*net.IPNet) []*net.IPNet {
 	copy := make([]*net.IPNet, len(ipnets))
 	for i := range ipnets {
-		ipnet := *ipnets[i]
-		copy[i] = &ipnet
+		if ipnets[i] == nil {
+			continue
+		}
+		copy[i] = &net.IPNet{
+			IP:   slices.Clone(ipnets[i].IP),
+			Mask: slices.Clone(ipnets[i].Mask),
+		}
 	}
 	return copy
+}
+
+func isIPNetEqual(ipn1, ipn2 *net.IPNet) bool {
+	if ipn1 == ipn2 {
+		return true
+	}
+	if ipn1 == nil || ipn2 == nil {
+		return false
+	}
+	m1, _ := ipn1.Mask.Size()
+	m2, _ := ipn2.Mask.Size()
+	return m1 == m2 && ipn1.IP.Equal(ipn2.IP)
+}
+
+// IsIPNetsEqual returns true if both IPNet slices are equal in length and values, regardless of order.
+func IsIPNetsEqual(ipn1, ipn2 []*net.IPNet) bool {
+	if len(ipn1) != len(ipn2) {
+		return false
+	}
+	used := make([]bool, len(ipn2))
+	for i := range ipn1 {
+		found := false
+		for j := range ipn2 {
+			if used[j] {
+				continue
+			}
+			if isIPNetEqual(ipn1[i], ipn2[j]) {
+				used[j] = true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // IPsToNetworkIPs returns the network CIDRs of the provided IP CIDRs
@@ -462,4 +554,15 @@ func GetLastIPOfSubnet(subnet *net.IPNet, indexFromLast int) *net.IPNet {
 	r = append(make([]byte, 16), r...)
 	lastIP := net.IP(r[len(r)-16:])
 	return &net.IPNet{IP: lastIP, Mask: subnet.Mask}
+}
+
+func NetworksOverlap(n1, n2 []*net.IPNet) bool {
+	for _, s1 := range n1 {
+		for _, s2 := range n2 {
+			if s1.Contains(s2.IP) || s2.Contains(s1.IP) {
+				return true
+			}
+		}
+	}
+	return false
 }

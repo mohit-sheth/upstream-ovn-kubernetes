@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -9,9 +12,9 @@ import (
 	cache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
 )
 
 type gwEventHandler struct {
@@ -41,7 +44,7 @@ func (g *gateway) newRetryFrameworkNodeWithParameters(
 			syncFunc: syncFunc,
 		},
 	}
-	r := retry.NewRetryFramework(g.stopChan, g.wg, g.watchFactory, resourceHandler)
+	r := retry.NewRetryFramework("nodeGateway", g.stopChan, g.wg, g.watchFactory, resourceHandler)
 
 	return r
 }

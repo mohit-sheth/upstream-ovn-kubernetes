@@ -1,11 +1,14 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package udn
 
 import (
 	"fmt"
 	"net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	ipgenerator "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/generator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	ipgenerator "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/ip"
 )
 
 const (

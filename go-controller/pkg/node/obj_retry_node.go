@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -9,12 +12,12 @@ import (
 	discovery "k8s.io/api/discovery/v1"
 	cache "k8s.io/client-go/tools/cache"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/managementport"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/managementport"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type nodeEventHandler struct {
@@ -53,7 +56,7 @@ func (nc *DefaultNodeNetworkController) newRetryFrameworkNodeWithParameters(
 		},
 	}
 
-	r := retry.NewRetryFramework(nc.stopChan, nc.wg, nc.watchFactory.(*factory.WatchFactory), resourceHandler)
+	r := retry.NewRetryFramework("Default/NodeController", nc.stopChan, nc.wg, nc.watchFactory.(*factory.WatchFactory), resourceHandler)
 
 	return r
 }
@@ -176,10 +179,24 @@ func (h *nodeEventHandler) AddResource(obj interface{}, _ bool) error {
 		node := obj.(*corev1.Node)
 		// if it's our node that is changing, then nothing to do as we dont add our own IP to the nftables rules
 		if node.Name == h.nc.name {
-			if config.OvnKubeNode.Mode != types.NodeModeDPU && util.NodeDontSNATSubnetAnnotationExist(node) {
-				err := managementport.UpdateNoSNATSubnetsSets(node, util.ParseNodeDontSNATSubnetsList)
-				if err != nil {
-					return fmt.Errorf("error updating no snat subnets sets: %w", err)
+			if config.IsModeDPUHost() || config.IsModeFull() {
+				if util.NodeDontSNATSubnetAnnotationExist(node) {
+					err := managementport.UpdateNoSNATSubnetsSets(node, util.ParseNodeDontSNATSubnetsList)
+					if err != nil {
+						return fmt.Errorf("error updating no snat subnets sets: %w", err)
+					}
+				}
+
+				// Sync nftables sets for no-overlay SNAT exemption in LGW mode.
+				// In SGW mode, OVN address sets are used instead.
+				if config.Default.Transport == types.NetworkTransportNoOverlay && config.NoOverlay.OutboundSNAT == types.NoOverlaySNATEnabled && config.Gateway.Mode == config.GatewayModeLocal {
+					hostAddrs, err := util.GetNodeHostAddrs(node)
+					if err != nil {
+						return fmt.Errorf("failed to get host addresses for node %s: %w", node.Name, err)
+					}
+					if err := syncNoOverlaySNATExemptNFTSets(hostAddrs); err != nil {
+						return fmt.Errorf("failed to sync no-overlay SNAT exemption nftables sets: %w", err)
+					}
 				}
 			}
 
@@ -199,16 +216,16 @@ func (h *nodeEventHandler) AddResource(obj interface{}, _ bool) error {
 func (h *nodeEventHandler) UpdateResource(oldObj, newObj interface{}, _ bool) error {
 	switch h.objType {
 	case factory.NamespaceExGwType:
-		// If interconnect is disabled OR interconnect is running in single-zone-mode,
-		// the ovnkube-master is responsible for patching ICNI managed namespaces with
-		// "k8s.ovn.org/external-gw-pod-ips". In that case, we need ovnkube-node to flush
-		// conntrack on every node. In multi-zone-interconnect case, we will handle the flushing
-		// directly on the ovnkube-controller code to avoid an extra namespace annotation
+		// This handler runs in single-zone deployments (default zone), where
+		// ovnkube-controller patches the "k8s.ovn.org/external-gw-pod-ips"
+		// namespace annotation and ovnkube-node reacts here to flush conntrack on
+		// every node. In multi-zone interconnect, ovnkube-controller flushes
+		// conntrack directly and this annotation is not used.
 		node, err := h.nc.watchFactory.GetNode(h.nc.name)
 		if err != nil {
 			return fmt.Errorf("error retrieving node %s: %v", h.nc.name, err)
 		}
-		if !config.OVNKubernetesFeature.EnableInterconnect || util.GetNodeZone(node) == types.OvnDefaultZone {
+		if util.GetNodeZone(node) == types.OvnDefaultZone {
 			newNs := newObj.(*corev1.Namespace)
 			return h.nc.syncConntrackForExternalGateways(newNs)
 		}
@@ -226,20 +243,33 @@ func (h *nodeEventHandler) UpdateResource(oldObj, newObj interface{}, _ bool) er
 
 		// if it's our node that is changing, then nothing to do as we dont add our own IP to the nftables rules
 		if newNode.Name == h.nc.name {
+			if (config.IsModeDPUHost() || config.IsModeFull()) && !reflect.DeepEqual(oldNode.Annotations, newNode.Annotations) {
+				// if node's dont SNAT subnet annotation changed sync nftables
+				if util.NodeDontSNATSubnetAnnotationChanged(oldNode, newNode) {
+					err := managementport.UpdateNoSNATSubnetsSets(newNode, util.ParseNodeDontSNATSubnetsList)
+					if err != nil {
+						return fmt.Errorf("error updating no snat subnets sets: %w", err)
+					}
+				}
 
-			// if node's dont SNAT subnet annotation changed sync nftables
-			if config.OvnKubeNode.Mode != types.NodeModeDPU &&
-				!reflect.DeepEqual(oldNode.Annotations, newNode.Annotations) &&
-				util.NodeDontSNATSubnetAnnotationChanged(oldNode, newNode) {
-				err := managementport.UpdateNoSNATSubnetsSets(newNode, util.ParseNodeDontSNATSubnetsList)
-				if err != nil {
-					return fmt.Errorf("error updating no snat subnets sets: %w", err)
+				// Sync nftables sets for no-overlay SNAT exemption in LGW mode if host addresses annotation changed.
+				// In SGW mode, OVN address sets are used instead.
+				if config.Default.Transport == types.NetworkTransportNoOverlay && config.NoOverlay.OutboundSNAT == types.NoOverlaySNATEnabled && config.Gateway.Mode == config.GatewayModeLocal {
+					if util.NodeHostCIDRsAnnotationChanged(oldNode, newNode) {
+						hostAddrs, err := util.GetNodeHostAddrs(newNode)
+						if err != nil {
+							return fmt.Errorf("failed to get host addresses for node %s: %w", newNode.Name, err)
+						}
+						if err := syncNoOverlaySNATExemptNFTSets(hostAddrs); err != nil {
+							return fmt.Errorf("failed to sync no-overlay SNAT exemption nftables sets: %w", err)
+						}
+					}
 				}
 			}
 			return nil
 		}
 
-		if config.OvnKubeNode.Mode != types.NodeModeDPU && util.NodeHostCIDRsAnnotationChanged(oldNode, newNode) {
+		if (config.IsModeDPUHost() || config.IsModeFull()) && util.NodeHostCIDRsAnnotationChanged(oldNode, newNode) {
 			// remote node that is changing
 			// Use GetNodeAddresses to get new node IPs
 			newIPsv4, newIPsv6, err := util.GetNodeAddresses(config.IPv4Mode, config.IPv6Mode, newNode)
@@ -300,7 +330,7 @@ func (h *nodeEventHandler) DeleteResource(obj, _ interface{}) error {
 
 	case factory.NodeType:
 		h.nc.deleteNode(obj.(*corev1.Node))
-		if config.OvnKubeNode.Mode != types.NodeModeDPU {
+		if config.IsModeDPUHost() || config.IsModeFull() {
 			_ = managementport.UpdateNoSNATSubnetsSets(obj.(*corev1.Node), func(_ *corev1.Node) ([]string, error) {
 				return []string{}, nil
 			})

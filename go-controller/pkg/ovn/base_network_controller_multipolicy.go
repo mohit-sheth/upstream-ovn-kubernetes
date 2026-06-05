@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -9,7 +12,7 @@ import (
 	knet "k8s.io/api/networking/v1"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const PolicyForAnnotation = "k8s.v1.cni.cncf.io/policy-for"
@@ -54,7 +57,8 @@ func (bsnc *BaseUserDefinedNetworkController) shouldApplyMultiPolicy(mpolicy *mn
 			networkName = substrings[1]
 			networkNamespace = substrings[0]
 		}
-		if bsnc.HasNAD(util.GetNADName(networkNamespace, networkName)) {
+		nadKey := util.GetNADName(networkNamespace, networkName)
+		if bsnc.networkManager.GetNetworkNameForNADKey(nadKey) == bsnc.GetNetworkName() {
 			return true
 		}
 	}

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -11,17 +14,21 @@ import (
 	knet "k8s.io/api/networking/v1"
 	utilnet "k8s.io/utils/net"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
 	// emptyIdx is used to create ACL for gressPolicy that doesn't have ipBlocks
 	emptyIdx = -1
+	// ipBlockCombinedIdx is used when creating an ACL for a gressPolicy
+	// that contains ipBlocks. Previously, one ACL was created per ipBlock.
+	// This is changed to create a single combined ACL for all ipBlocks,
+	// and this special index value identifies those new ACLs.
+	ipBlockCombinedIdx = -2
 )
 
 type gressPolicy struct {
@@ -38,9 +45,7 @@ type gressPolicy struct {
 	// peerV6AddressSets has Address sets for all namespaces and pod selectors for IPv6
 	peerV6AddressSets *sync.Map
 	// if gressPolicy has at least 1 rule with selector, set this field to true.
-	// This is required to distinguish gress that doesn't have any peerAddressSets added yet
-	// (e.g. because there are no namespaces matching label selector) and should allow nothing,
-	// from empty gress, which should allow all.
+	// This field is a quick check on whether at least 1 peerAddressSets has been added (and they are never deleted)
 	hasPeerSelector bool
 
 	// portPolicies represents all the ports to which traffic is allowed for
@@ -94,9 +99,11 @@ func syncMapToSortedList(m *sync.Map) []string {
 func (gp *gressPolicy) addPeerAddressSets(asHashNameV4, asHashNameV6 string) {
 	if gp.ipv4Mode && asHashNameV4 != "" {
 		gp.peerV4AddressSets.Store("$"+asHashNameV4, true)
+		gp.hasPeerSelector = true
 	}
 	if gp.ipv6Mode && asHashNameV6 != "" {
 		gp.peerV6AddressSets.Store("$"+asHashNameV6, true)
+		gp.hasPeerSelector = true
 	}
 }
 
@@ -167,14 +174,14 @@ func (gp *gressPolicy) allIPsMatch() string {
 	}
 }
 
-func (gp *gressPolicy) getMatchFromIPBlock(lportMatch, l4Match string) []string {
+func (gp *gressPolicy) getMatchFromIPBlock(lportMatch, l4Match string) string {
 	var direction string
 	if gp.policyType == knet.PolicyTypeIngress {
 		direction = "src"
 	} else {
 		direction = "dst"
 	}
-	var matchStrings []string
+	var ipBlockMatches []string
 	var matchStr, ipVersion string
 	for _, ipBlock := range gp.ipBlocks {
 		if utilnet.IsIPv6CIDRString(ipBlock.CIDR) {
@@ -185,79 +192,22 @@ func (gp *gressPolicy) getMatchFromIPBlock(lportMatch, l4Match string) []string 
 		if len(ipBlock.Except) == 0 {
 			matchStr = fmt.Sprintf("%s.%s == %s", ipVersion, direction, ipBlock.CIDR)
 		} else {
-			matchStr = fmt.Sprintf("%s.%s == %s && %s.%s != {%s}", ipVersion, direction, ipBlock.CIDR,
+			matchStr = fmt.Sprintf("(%s.%s == %s && %s.%s != {%s})", ipVersion, direction, ipBlock.CIDR,
 				ipVersion, direction, strings.Join(ipBlock.Except, ", "))
 		}
-		if l4Match == libovsdbutil.UnspecifiedL4Match {
-			matchStr = fmt.Sprintf("%s && %s", matchStr, lportMatch)
-		} else {
-			matchStr = fmt.Sprintf("%s && %s && %s", matchStr, l4Match, lportMatch)
-		}
-		matchStrings = append(matchStrings, matchStr)
+		ipBlockMatches = append(ipBlockMatches, matchStr)
 	}
-	return matchStrings
-}
+	var l3Match string
+	if len(ipBlockMatches) == 1 {
+		l3Match = ipBlockMatches[0]
+	} else {
+		l3Match = fmt.Sprintf("(%s)", strings.Join(ipBlockMatches, " || "))
+	}
 
-// addNamespaceAddressSet adds a namespace address set to the gress policy.
-// If the address set is not found in the db, return error.
-// If the address set is already added for this policy, return false, otherwise returns true.
-// This function is safe for concurrent use, doesn't require additional synchronization
-func (gp *gressPolicy) addNamespaceAddressSet(name string, asf addressset.AddressSetFactory) (bool, error) {
-	dbIDs := getNamespaceAddrSetDbIDs(name, gp.controllerName)
-	as, err := asf.GetAddressSet(dbIDs)
-	if err != nil {
-		return false, fmt.Errorf("cannot add peer namespace %s: failed to get address set: %v", name, err)
+	if l4Match == libovsdbutil.UnspecifiedL4Match {
+		return fmt.Sprintf("%s && %s", l3Match, lportMatch)
 	}
-	v4HashName, v6HashName := as.GetASHashNames()
-	if v4HashName == "" && v6HashName == "" {
-		// This would happen when a namespace is not yet reconciled with UDN network.
-		return false, fmt.Errorf("cannot add peer namespace %s: address set has empty hashed name", name)
-	}
-	v4HashName = "$" + v4HashName
-	v6HashName = "$" + v6HashName
-
-	v4NoUpdate := true
-	v6NoUpdate := true
-	// only update vXNoUpdate if value was stored and not loaded
-	if gp.ipv4Mode {
-		_, v4NoUpdate = gp.peerV4AddressSets.LoadOrStore(v4HashName, true)
-	}
-	if gp.ipv6Mode {
-		_, v6NoUpdate = gp.peerV6AddressSets.LoadOrStore(v6HashName, true)
-	}
-	if v4NoUpdate && v6NoUpdate {
-		// no changes were applied, return false
-		return false, nil
-	}
-	return true, nil
-}
-
-// delNamespaceAddressSet removes a namespace address set from the gress policy.
-// If the address set is already deleted for this policy, return false, otherwise returns true.
-// This function is safe for concurrent use, doesn't require additional synchronization
-func (gp *gressPolicy) delNamespaceAddressSet(name string) bool {
-	dbIDs := getNamespaceAddrSetDbIDs(name, gp.controllerName)
-	v4HashName, v6HashName := addressset.GetHashNamesForAS(dbIDs)
-	if v4HashName == "" && v6HashName == "" {
-		return false
-	}
-	v4HashName = "$" + v4HashName
-	v6HashName = "$" + v6HashName
-
-	v4Update := false
-	v6Update := false
-	// only update vXUpdate if value was loaded
-	if gp.ipv4Mode {
-		_, v4Update = gp.peerV4AddressSets.LoadAndDelete(v4HashName)
-	}
-	if gp.ipv6Mode {
-		_, v6Update = gp.peerV6AddressSets.LoadAndDelete(v6HashName)
-	}
-	if v4Update || v6Update {
-		// at least 1 address set was updated, return true
-		return true
-	}
-	return false
+	return fmt.Sprintf("%s && %s && %s", l3Match, l4Match, lportMatch)
 }
 
 func (gp *gressPolicy) isEmpty() bool {
@@ -285,13 +235,11 @@ func (gp *gressPolicy) buildLocalPodACLs(portGroupName string, aclLogging *libov
 	for protocol, l4Match := range libovsdbutil.GetL4MatchesFromNetworkPolicyPorts(gp.portPolicies) {
 		if len(gp.ipBlocks) > 0 {
 			// Add ACL allow rule for IPBlock CIDR
-			ipBlockMatches := gp.getMatchFromIPBlock(lportMatch, l4Match)
-			for ipBlockIdx, ipBlockMatch := range ipBlockMatches {
-				aclIDs := gp.getNetpolACLDbIDs(ipBlockIdx, protocol)
-				acl := libovsdbutil.BuildACLWithDefaultTier(aclIDs, types.DefaultAllowPriority, ipBlockMatch, action,
-					aclLogging, gp.aclPipeline)
-				createdACLs = append(createdACLs, acl)
-			}
+			ipBlockMatch := gp.getMatchFromIPBlock(lportMatch, l4Match)
+			aclIDs := gp.getNetpolACLDbIDs(ipBlockCombinedIdx, protocol)
+			acl := libovsdbutil.BuildACLWithDefaultTier(aclIDs, types.DefaultAllowPriority, ipBlockMatch, action,
+				aclLogging, gp.aclPipeline)
+			createdACLs = append(createdACLs, acl)
 		}
 		// if there are pod/namespace selector, then allow packets from/to that address_set or
 		// if the NetworkPolicyPeer is empty, then allow from all sources or to all destinations.
@@ -334,10 +282,10 @@ func (gp *gressPolicy) getNetpolACLDbIDs(ipBlockIdx int, protocol string) *libov
 			// gress rule index
 			libovsdbops.GressIdxKey: strconv.Itoa(gp.idx),
 			// acls are created for every gp.portPolicies which are grouped by protocol:
-			// - for empty policy (no selectors and no ip blocks) - empty ACL
+			// - for empty policy (no selectors and no ip blocks) - empty ACL with idx=emptyIdx (-1)
 			// OR
-			// - all selector-based peers ACL
-			// - for every IPBlock +1 ACL
+			// - all selector-based peers ACL with idx=emptyIdx (-1)
+			// - all ipBlocks combined into a single ACL with idx=ipBlockCombinedIdx (-2)
 			// Therefore unique id for a given gressPolicy is protocol name + IPBlock idx
 			// (protocol will be "None" if no port policy is defined, and empty policy and all
 			// selector-based peers ACLs will have idx=-1)

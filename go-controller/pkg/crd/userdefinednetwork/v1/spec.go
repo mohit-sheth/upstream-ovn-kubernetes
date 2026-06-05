@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package v1
 
 func (s *UserDefinedNetworkSpec) GetTopology() NetworkTopology {
@@ -17,6 +20,21 @@ func (s *UserDefinedNetworkSpec) GetLocalnet() *LocalnetConfig {
 	return nil
 }
 
+func (s *UserDefinedNetworkSpec) GetTransport() TransportOption {
+	// UDN (namespace-scoped) does not support transport customization
+	return ""
+}
+
+func (s *UserDefinedNetworkSpec) GetEVPN() *EVPNConfig {
+	// UDN (namespace-scoped) does not support EVPN
+	return nil
+}
+
+func (s *UserDefinedNetworkSpec) GetNoOverlay() *NoOverlayConfig {
+	// UDN (namespace-scoped) does not support no-overlay transport
+	return nil
+}
+
 func (s *NetworkSpec) GetTopology() NetworkTopology {
 	return s.Topology
 }
@@ -31,4 +49,16 @@ func (s *NetworkSpec) GetLayer2() *Layer2Config {
 
 func (s *NetworkSpec) GetLocalnet() *LocalnetConfig {
 	return s.Localnet
+}
+
+func (s *NetworkSpec) GetTransport() TransportOption {
+	return s.Transport
+}
+
+func (s *NetworkSpec) GetEVPN() *EVPNConfig {
+	return s.EVPN
+}
+
+func (s *NetworkSpec) GetNoOverlay() *NoOverlayConfig {
+	return s.NoOverlay
 }

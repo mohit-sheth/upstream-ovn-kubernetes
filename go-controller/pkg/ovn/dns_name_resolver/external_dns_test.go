@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package dnsnameresolver
 
 import (
@@ -15,13 +18,13 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func newDNSNameResolverObject(name, namespace, dnsName string, addresses []string) *ocpnetworkapiv1alpha1.DNSNameResolver {
@@ -68,7 +71,7 @@ var _ = ginkgo.Describe("Egress Firewall External DNS Operations", func() {
 		extEgDNS              *ExternalEgressDNS
 		_, clusterSubnet, _   = net.ParseCIDR("10.128.0.0/14")
 		wf                    *factory.WatchFactory
-		fakeClient            *util.OVNMasterClientset
+		fakeClient            *util.OVNKubeControllerClientset
 		fakeAddressSetFactory addressset.AddressSetFactory
 		nbClient              libovsdbclient.Client
 		testdbCtx             *libovsdbtest.Context
@@ -82,8 +85,8 @@ var _ = ginkgo.Describe("Egress Firewall External DNS Operations", func() {
 	start := func(objects ...runtime.Object) {
 		var err error
 
-		fakeClient = util.GetOVNClientset(objects...).GetMasterClientset()
-		wf, err = factory.NewMasterWatchFactory(fakeClient)
+		fakeClient = util.GetOVNClientset(objects...).GetOVNKubeControllerClientset()
+		wf, err = factory.NewOVNKubeControllerWatchFactory(fakeClient)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		extEgDNS, err = NewExternalEgressDNS(fakeAddressSetFactory, DefaultNetworkControllerName, true,

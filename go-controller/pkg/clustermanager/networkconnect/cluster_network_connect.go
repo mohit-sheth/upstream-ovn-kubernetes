@@ -1,26 +1,36 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package networkconnect
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
+	"slices"
 	"time"
 
-	nadlisters "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/listers/k8s.cni.cncf.io/v1"
-
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
+	metaapply "k8s.io/client-go/applyconfigurations/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	networkconnectv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
-	apitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	networkconnectv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1"
+	cncapply "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/applyconfiguration/clusternetworkconnect/v1"
+	apitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
+
+const fieldManager = "clustermanager-networkconnect-controller"
 
 var (
 	errConfig = errors.New("configuration error")
@@ -35,11 +45,11 @@ var (
 //
 // If the namespace uses the default network (no primary UDN), returns ("", nil, nil).
 // Callers should check for empty nadKey to determine if namespace has a primary UDN.
-func getPrimaryNADForNamespace(networkMgr networkmanager.Interface, namespaceName string, nadLister nadlisters.NetworkAttachmentDefinitionLister) (nadKey string, network util.NetInfo, err error) {
+func getPrimaryNADForNamespace(networkMgr networkmanager.Interface, namespaceName string) (nadKey string, network util.NetInfo, err error) {
 	namespacePrimaryNetwork, err := networkMgr.GetActiveNetworkForNamespace(namespaceName)
 	if err != nil {
-		if util.IsInvalidPrimaryNetworkError(err) || util.IsUnprocessedActiveNetworkError(err) {
-			// We intentionally ignore the unprocessed active network error because
+		if util.IsInvalidPrimaryNetworkError(err) {
+			// We intentionally ignore the invalid primary network error because
 			// UDN Controller hasn't created the NAD yet, OR NAD doesn't exist in a
 			// namespace that has the required UDN label. It could also be that the
 			// UDN was deleted and the NAD is also gone.
@@ -47,46 +57,67 @@ func getPrimaryNADForNamespace(networkMgr networkmanager.Interface, namespaceNam
 		}
 		return "", nil, err
 	}
-	if namespacePrimaryNetwork.IsDefault() {
+	if namespacePrimaryNetwork == nil || namespacePrimaryNetwork.IsDefault() {
 		// No primary UDN in this namespace
 		return "", nil, nil
 	}
-	// Get the NAD key for the primary network in this namespace.
-	// Since this is for namespace-scoped UDNs, we expect exactly one NAD per network.
-	// Today we don't support multiple primary NADs for a namespace, so this is safe.
-	// Also note if the user misconfigures and ends up with CUDN and UDN for the same namespace,
-	// and if the CUDN was created first - which means the UDN won't be created successfully,
-	// then the user uses the P-UDN selector, the CUDN's NAD will be chosen here for this selector
-	// but that's a design flaw in the user's configuration, and expectation is for users to use
-	// the selectors correctly.
-	primaryNADs := namespacePrimaryNetwork.GetNADs()
-	if len(primaryNADs) != 1 {
-		return "", nil, fmt.Errorf("expected exactly one primary NAD for namespace %s, got %d", namespaceName, len(primaryNADs))
-	}
-	// There is a race condition where NAD is already deleted from kapi
-	// but network manager is too slow to update the network manager cache.
-	// In this case, GetNADs() will return the NADs even though they are deleted.
-	// So let's fetch the NAD again from the kapi to double confirm it exists
-	// before returning it.
-	nadNamespace, nadName, err := cache.SplitMetaNamespaceKey(primaryNADs[0])
+	primaryNADKey, err := networkMgr.GetPrimaryNADForNamespace(namespaceName)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to split NAD key %s: %w", primaryNADs[0], err)
-	}
-	_, err = nadLister.NetworkAttachmentDefinitions(nadNamespace).Get(nadName)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			klog.Warningf("NAD %s not found in kapi, returning empty network info even if network manager cache says it exists", primaryNADs[0])
+		if util.IsInvalidPrimaryNetworkError(err) {
 			return "", nil, nil
 		}
 		return "", nil, err
 	}
-	// GetNADs() returns NADs in "namespace/name" format, so use directly
-	return primaryNADs[0], namespacePrimaryNetwork, nil
+	if primaryNADKey == ovntypes.DefaultNetworkName {
+		return "", nil, nil
+	}
+	return primaryNADKey, namespacePrimaryNetwork, nil
+}
+
+func (c *Controller) updateStatus(cnc *networkconnectv1.ClusterNetworkConnect, e error) {
+	condition := metaapply.Condition().
+		WithType("Accepted").
+		WithStatus("True").
+		WithReason("ResourceAllocationSucceeded").
+		WithMessage("All validation checks passed successfully")
+	if e != nil {
+		msg := e.Error()
+		if len(msg) >= 32767 { // max length of message can be 32768
+			msg = msg[:32766]
+		}
+		condition = condition.WithStatus("False").
+			WithReason("ResourceAllocationFailed").
+			WithMessage(msg)
+	}
+	// check if condition actually changed before updating status
+	existingCondition := meta.FindStatusCondition(cnc.Status.Conditions, "Accepted")
+	if existingCondition != nil &&
+		existingCondition.Status == *condition.Status &&
+		existingCondition.Reason == *condition.Reason &&
+		existingCondition.Message == *condition.Message {
+		return
+	}
+	if existingCondition == nil || existingCondition.Status != *condition.Status {
+		// LastTransitionTime should only be updated in the Status (True/False)	changes
+		condition = condition.WithLastTransitionTime(metav1.NewTime(time.Now()))
+	}
+
+	_, err := c.cncClient.K8sV1().ClusterNetworkConnects().ApplyStatus(
+		context.Background(),
+		cncapply.ClusterNetworkConnect(cnc.Name).WithStatus(
+			cncapply.ClusterNetworkConnectStatus().WithConditions(condition),
+		),
+		metav1.ApplyOptions{
+			FieldManager: fieldManager,
+			Force:        true,
+		},
+	)
+	if err != nil {
+		klog.Errorf("Failed to update status for cluster network connect %s: %v", cnc.Name, err)
+	}
 }
 
 func (c *Controller) reconcileClusterNetworkConnect(key string) error {
-	c.Lock()
-	defer c.Unlock()
 	startTime := time.Now()
 	_, cncName, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -100,6 +131,16 @@ func (c *Controller) reconcileClusterNetworkConnect(key string) error {
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to get CNC %s: %w", cncName, err)
 	}
+	err = c.syncClusterNetworkConnect(cncName, cnc)
+	if cnc != nil {
+		c.updateStatus(cnc, err)
+	}
+	return err
+}
+
+func (c *Controller) syncClusterNetworkConnect(cncName string, cnc *networkconnectv1.ClusterNetworkConnect) error {
+	c.Lock()
+	defer c.Unlock()
 	cncState, cncExists := c.cncCache[cncName]
 	if cnc == nil {
 		// CNC is being deleted, clean up resources
@@ -129,12 +170,35 @@ func (c *Controller) reconcileClusterNetworkConnect(key string) error {
 		if err != nil {
 			return fmt.Errorf("failed to initialize subnet allocator for CNC %s: %w", cncName, err)
 		}
+		connectSubnets := []*net.IPNet{}
+		for _, cs := range cnc.Spec.ConnectSubnets {
+			// ignore error, this was already parsed for NewHybridConnectSubnetAllocator
+			_, cidr, _ := net.ParseCIDR(string(cs.CIDR))
+			connectSubnets = append(connectSubnets, cidr)
+		}
+		cncState.connectSubnets = connectSubnets
 		cncState.allocator = connectSubnetAllocator
 		klog.V(5).Infof("Initialized subnet allocator for CNC %s", cncName)
 		c.cncCache[cnc.Name] = cncState
 	}
-	// STEP1: Validate the CNC
-	// STEP2: Generate a tunnelID for the connect router corresponding to this CNC
+
+	// STEP1: Discover the selected UDNs and CUDNs
+	// Discovery, allocation, and release continue on per-network errors, so healthy networks
+	// make progress. Errors are aggregated and returned at the end.
+	var errs []error
+	discoveredNetworks, allMatchingNADKeys, err := c.discoverSelectedNetworks(cnc)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("failed to discover selected networks for CNC %s: %w", cncName, err))
+	}
+	// STEP2: Validate the CNC
+	if err = validateCNC(cncState, discoveredNetworks); err != nil {
+		return fmt.Errorf("validation failed for CNC %s: %w", cncName, err)
+	}
+	if err = c.crossValidateCNCs(cncState, discoveredNetworks); err != nil {
+		return fmt.Errorf("cross-validation failed for CNC %s: %w", cncName, err)
+	}
+
+	// STEP3: Generate a tunnelID for the connect router corresponding to this CNC
 	// passing a value greater than 4096 as networkID - actually we don't need this value,
 	// but it's required by the allocator to ensure that the prederministic tunnel keys
 	// that are derived from the networkID are not reused for backwards compatibility reasons.
@@ -151,14 +215,7 @@ func (c *Controller) reconcileClusterNetworkConnect(key string) error {
 		}
 		cncState.tunnelID = tunnelID[0]
 	}
-	// STEP3: Discover the selected UDNs and CUDNs
-	// Discovery, allocation, and release continue on per-network errors, so healthy networks
-	// make progress. Errors are aggregated and returned at the end.
-	var errs []error
-	discoveredNetworks, allMatchingNADKeys, err := c.discoverSelectedNetworks(cnc)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("failed to discover selected networks for CNC %s: %w", cncName, err))
-	}
+
 	// STEP4: Generate or release subnets of size CNC.Spec.ConnectSubnets.NetworkPrefix for each layer3 network
 	//  and /31 or /127 subnets for each layer2 network
 	// We intentionally don't compute or use the networksNeedingAllocation set here because we want to return all
@@ -199,8 +256,104 @@ func (c *Controller) reconcileClusterNetworkConnect(key string) error {
 	return kerrors.NewAggregate(errs)
 }
 
+// validateCNC performs validation checks for the given CNC connectNetworks and discovered networks.
+func validateCNC(cncState *clusterNetworkConnectState, discoveredNetworks []util.NetInfo) error {
+	// Check for overlap with cluster networks.
+	// This includes service CIDR and masquerade CIDR
+	if err := util.CheckSubnetOverlapWithClusterSubnets(cncState.connectSubnets, "ClusterNetworkConnect.connectSubnets"); err != nil {
+		return fmt.Errorf("cluster subnets overlap with cluster network connect subnets: %w", err)
+	}
+	// Check for subnet overlaps between connectSubnets and discovered networks.
+	// That includes overlaps with pod subnet, transit and join subnets.
+	if err := util.CheckSubnetOverlapWithNetworks(cncState.connectSubnets, "ClusterNetworkConnect.connectSubnets", discoveredNetworks); err != nil {
+		return fmt.Errorf("selected networks overlap with cluster network connect subnets: %w", err)
+	}
+	// Now check for overlaps among the discovered networks themselves.
+	if err := util.CheckNetworksOverlap(discoveredNetworks); err != nil {
+		return fmt.Errorf("can not connect selected networks: selected networks have overlapping subnets: %w", err)
+	}
+	// Also check ipFamily compatibility between discovered networks and connectSubnets
+	// The only incompatible case is when discovered networks contain both ipv4-only and ipv6-only networks.
+	var ipv4Only, ipv6Only string
+	for _, network := range discoveredNetworks {
+		networkIPv4, networkIPv6 := network.IPMode()
+		if networkIPv4 && !networkIPv6 {
+			// ipv4 only network
+			if ipv6Only != "" {
+				// conflict
+				return fmt.Errorf("IP family conflict: connected network %s has only ipv4 subnets, but another connected network %s has only ipv6 subnets",
+					network.GetNetworkName(), ipv6Only)
+			}
+			ipv4Only = network.GetNetworkName()
+		} else if !networkIPv4 && networkIPv6 {
+			// ipv6 only network
+			if ipv4Only != "" {
+				// conflict
+				return fmt.Errorf("IP family conflict: connected network %s has only ipv6 subnets, but another connected network %s has only ipv4 subnets",
+					network.GetNetworkName(), ipv4Only)
+			}
+			ipv6Only = network.GetNetworkName()
+		}
+	}
+	// Check that connectSubnets can support the discovered networks' ipFamilies
+	var csIPv4, csIPv6 bool
+	for _, cs := range cncState.connectSubnets {
+		if cs.IP.To4() != nil {
+			csIPv4 = true
+		} else {
+			csIPv6 = true
+		}
+	}
+	if ipv4Only != "" && !csIPv4 {
+		return fmt.Errorf("IP family conflict: connected network %s is ipv4-only but connectSubnets do not contain an ipv4 subnet",
+			ipv4Only)
+	}
+	if ipv6Only != "" && !csIPv6 {
+		return fmt.Errorf("IP family conflict: connected network %s is ipv6-only but connectSubnets do not contain an ipv6 subnet",
+			ipv6Only)
+	}
+	return nil
+}
+
+func (c *Controller) crossValidateCNCs(cncState *clusterNetworkConnectState, discoveredNetworks []util.NetInfo) error {
+	// If more than 1 ClusterNetworkConnect API selects the same network, then they must have non-overlapping
+	// connectSubnets configured. If there is a conflict, we must emit an event and fail.
+	// OVN does not handle blocking the creation of two ports on the same router with same subnets.
+	// So if that happens, it will cause wrong routing and hence OVN-Kubernetes must detect this conflict.
+	// Step 1: find CNCs that have overlapping selected networks with this CNC
+	// Step 2: check for connectSubnets overlap with those CNCs
+
+	// Build a set of selected networks for this CNC.
+	// We can't use cncState.selectedNetworks because it is only updated at the end of the sync,
+	// and validation should happen before that.
+	currentCNCSelectedNetworks := sets.New[string]()
+	for _, network := range discoveredNetworks {
+		networkID := network.GetNetworkID()
+		if networkID == ovntypes.NoNetworkID {
+			continue
+		}
+		topologyType := network.TopologyType()
+		owner := util.ComputeNetworkOwner(topologyType, networkID)
+		currentCNCSelectedNetworks.Insert(owner)
+	}
+	for otherCNCName, otherCNCState := range c.cncCache {
+		if otherCNCName == cncState.name {
+			continue
+		}
+		overlappingNetworks := currentCNCSelectedNetworks.Intersection(otherCNCState.selectedNetworks)
+		if len(overlappingNetworks) != 0 {
+			// There are overlapping selected networks, check for connectSubnets overlap
+			if util.NetworksOverlap(cncState.connectSubnets, otherCNCState.connectSubnets) {
+				return fmt.Errorf("connectSubnets overlap detected between CNC %s and CNC %s which both select networks %v",
+					cncState.name, otherCNCName, overlappingNetworks.UnsortedList())
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Controller) discoverSelectedNetworks(cnc *networkconnectv1.ClusterNetworkConnect) ([]util.NetInfo, sets.Set[string], error) {
-	discoveredNetworks := []util.NetInfo{}
+	discoveredNetworks := map[string]util.NetInfo{}
 	allMatchingNADKeys := sets.New[string]()
 	var errs []error
 
@@ -224,18 +377,24 @@ func (c *Controller) discoverSelectedNetworks(cnc *networkconnectv1.ClusterNetwo
 				if !isCUDN {
 					continue
 				}
-				network, err := util.ParseNADInfo(nad)
-				if err != nil {
-					errs = append(errs, fmt.Errorf("failed to parse NAD %s/%s: %w", nad.Namespace, nad.Name, err))
+				network := c.networkManager.GetNetInfoForNADKey(types.NamespacedName{Namespace: nad.Namespace, Name: nad.Name}.String())
+				if network == nil {
+					// if network doesn't exist in networkmanager, we will get an update later
+					klog.V(5).Infof("Failed to find NetInfo for NAD %s/%s", nad.Namespace, nad.Name)
 					continue
 				}
 				if !network.IsPrimaryNetwork() {
 					continue
 				}
+				if network.Transport() == ovntypes.NetworkTransportNoOverlay || network.Transport() == ovntypes.NetworkTransportEVPN {
+					errs = append(errs, fmt.Errorf("network %s has transport type %s that is not supported for networkConnect",
+						network.GetNetworkName(), network.Transport()))
+					continue
+				}
 				// This NAD passed all validation checks, so it's selected by this CNC
 				nadKey := nad.Namespace + "/" + nad.Name
 				allMatchingNADKeys.Insert(nadKey)
-				discoveredNetworks = append(discoveredNetworks, network)
+				discoveredNetworks[network.GetNetworkName()] = network
 			}
 		case apitypes.PrimaryUserDefinedNetworks:
 			namespaceSelector, err := metav1.LabelSelectorAsSelector(&selector.PrimaryUserDefinedNetworkSelector.NamespaceSelector)
@@ -249,7 +408,7 @@ func (c *Controller) discoverSelectedNetworks(cnc *networkconnectv1.ClusterNetwo
 				continue
 			}
 			for _, ns := range namespaces {
-				nadKey, namespacePrimaryNetwork, err := getPrimaryNADForNamespace(c.networkManager, ns.Name, c.nadLister)
+				nadKey, namespacePrimaryNetwork, err := getPrimaryNADForNamespace(c.networkManager, ns.Name)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("failed to get active network for namespace %s: %w", ns.Name, err))
 					continue
@@ -259,30 +418,14 @@ func (c *Controller) discoverSelectedNetworks(cnc *networkconnectv1.ClusterNetwo
 					continue
 				}
 				allMatchingNADKeys.Insert(nadKey)
-				discoveredNetworks = append(discoveredNetworks, namespacePrimaryNetwork)
+				discoveredNetworks[namespacePrimaryNetwork.GetNetworkName()] = namespacePrimaryNetwork
 			}
 		default:
 			errs = append(errs, fmt.Errorf("%w: unsupported network selection type %s", errConfig, selector.NetworkSelectionType))
 		}
 	}
 
-	return discoveredNetworks, allMatchingNADKeys, kerrors.NewAggregate(errs)
-}
-
-func computeNetworkOwner(networkType string, networkID int) string {
-	return fmt.Sprintf("%s_%d", networkType, networkID)
-}
-
-// parseNetworkOwnerTopology extracts the topology type from an owner key.
-// Owner keys are formatted as "{topology}_{networkID}" (e.g., "layer3_1", "layer2_2").
-func parseNetworkOwnerTopology(owner string) (topologyType string, ok bool) {
-	if len(owner) > len(ovntypes.Layer3Topology)+1 && owner[:len(ovntypes.Layer3Topology)] == ovntypes.Layer3Topology {
-		return ovntypes.Layer3Topology, true
-	}
-	if len(owner) > len(ovntypes.Layer2Topology)+1 && owner[:len(ovntypes.Layer2Topology)] == ovntypes.Layer2Topology {
-		return ovntypes.Layer2Topology, true
-	}
-	return "", false
+	return slices.Collect(maps.Values(discoveredNetworks)), allMatchingNADKeys, kerrors.NewAggregate(errs)
 }
 
 // allocateSubnets allocates subnets for the given discovered networks
@@ -302,14 +445,14 @@ func (c *Controller) allocateSubnets(discoveredNetworks []util.NetInfo, allocato
 		}
 		var err error
 		if network.TopologyType() == ovntypes.Layer3Topology {
-			owner = computeNetworkOwner(ovntypes.Layer3Topology, networkID)
+			owner = util.ComputeNetworkOwner(ovntypes.Layer3Topology, networkID)
 			subnets, err = allocator.AllocateLayer3Subnet(owner)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("failed to allocate Layer3 subnet for network %s: %w", network.GetNetworkName(), err))
 				continue
 			}
 		} else if network.TopologyType() == ovntypes.Layer2Topology {
-			owner = computeNetworkOwner(ovntypes.Layer2Topology, networkID)
+			owner = util.ComputeNetworkOwner(ovntypes.Layer2Topology, networkID)
 			subnets, err = allocator.AllocateLayer2Subnet(owner)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("failed to allocate Layer2 subnet for network %s: %w", network.GetNetworkName(), err))
@@ -333,8 +476,8 @@ func (c *Controller) releaseSubnets(networksNeedingRelease sets.Set[string],
 	allocator HybridConnectSubnetAllocator) error {
 	var errs []error
 	for networkKey := range networksNeedingRelease {
-		topologyType, ok := parseNetworkOwnerTopology(networkKey)
-		if !ok {
+		topologyType, _, err := util.ParseNetworkOwner(networkKey)
+		if err != nil {
 			errs = append(errs, fmt.Errorf("invalid network key format: %s", networkKey))
 			continue
 		}

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -14,9 +17,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 func TestMarshalPodAnnotation(t *testing.T) {
@@ -369,7 +372,17 @@ func TestGetPodIPsOfNetwork(t *testing.T) {
 	}
 	for i, tc := range tests {
 		t.Run(fmt.Sprintf("%d:%s", i, tc.desc), func(t *testing.T) {
-			res1, e := GetPodIPsOfNetwork(tc.inpPod, tc.networkInfo)
+			var resolver func(nadKey string) string
+			if tc.networkInfo.IsUserDefinedNetwork() {
+				expectedNADKey := GetNADName(namespace, secondaryNetworkName)
+				resolver = func(nadKey string) string {
+					if nadKey == expectedNADKey {
+						return tc.networkInfo.GetNetworkName()
+					}
+					return ""
+				}
+			}
+			res1, e := GetPodIPsOfNetwork(tc.inpPod, tc.networkInfo, resolver)
 			t.Log(res1, e)
 			if tc.errAssert {
 				require.Error(t, e)
@@ -383,7 +396,7 @@ func TestGetPodIPsOfNetwork(t *testing.T) {
 				assert.Equal(t, tc.outExp, res1)
 			}
 			if len(tc.outExp) > 0 {
-				res2, e := GetPodCIDRsWithFullMask(tc.inpPod, tc.networkInfo)
+				res2, e := GetPodCIDRsWithFullMask(tc.inpPod, tc.networkInfo, resolver)
 				t.Log(res2, e)
 				if tc.errAssert {
 					assert.Error(t, e)

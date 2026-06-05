@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ops
 
 import (
@@ -11,8 +14,8 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 )
 
 // ROUTER OPs
@@ -174,6 +177,19 @@ func GetLogicalRouterPort(nbClient libovsdbclient.Client, lrp *nbdb.LogicalRoute
 // router port together with the gateway chassis (if not nil), and adds it to the provided logical router
 func CreateOrUpdateLogicalRouterPort(nbClient libovsdbclient.Client, router *nbdb.LogicalRouter,
 	lrp *nbdb.LogicalRouterPort, chassis *nbdb.GatewayChassis, fields ...interface{}) error {
+	ops, err := CreateOrUpdateLogicalRouterPortOps(nbClient, nil, router, lrp, chassis, fields...)
+	if err != nil {
+		return err
+	}
+	_, err = TransactAndCheck(nbClient, ops)
+	return err
+}
+
+// CreateOrUpdateLogicalRouterPortOps creates or updates the provided logical
+// router port together with the gateway chassis (if not nil), adds it to the provided logical router,
+// and returns the corresponding ops
+func CreateOrUpdateLogicalRouterPortOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, router *nbdb.LogicalRouter,
+	lrp *nbdb.LogicalRouterPort, chassis *nbdb.GatewayChassis, fields ...interface{}) ([]ovsdb.Operation, error) {
 	opModels := []operationModel{}
 	if chassis != nil {
 		opModels = append(opModels, operationModel{
@@ -205,9 +221,9 @@ func CreateOrUpdateLogicalRouterPort(nbClient libovsdbclient.Client, router *nbd
 		BulkOp:           false,
 	})
 	m := newModelClient(nbClient)
-	_, err := m.CreateOrUpdate(opModels...)
+	ops, err := m.CreateOrUpdateOps(ops, opModels...)
 	router.Ports = originalPorts
-	return err
+	return ops, err
 }
 
 // DeleteLogicalRouterPorts deletes the provided logical router ports and
@@ -242,6 +258,29 @@ func DeleteLogicalRouterPorts(nbClient libovsdbclient.Client, router *nbdb.Logic
 	err := m.Delete(opModels...)
 	router.Ports = originalPorts
 	return err
+}
+
+func DeleteLogicalRouterPortWithPredicateOps(nbClient libovsdbclient.Client, ops []ovsdb.Operation, routerName string, p logicalRouterPortPredicate) ([]ovsdb.Operation, error) {
+	router := &nbdb.LogicalRouter{Name: routerName}
+	deleted := []*nbdb.LogicalRouterPort{}
+	opModels := []operationModel{
+		{
+			ModelPredicate: p,
+			ExistingResult: &deleted,
+			DoAfter:        func() { router.Ports = extractUUIDsFromModels(&deleted) },
+			ErrNotFound:    false,
+			BulkOp:         true,
+		},
+		{
+			Model:            router,
+			OnModelMutations: []interface{}{&router.Ports},
+			ErrNotFound:      false,
+			BulkOp:           false,
+		},
+	}
+
+	m := newModelClient(nbClient)
+	return m.DeleteOps(ops, opModels...)
 }
 
 // LOGICAL ROUTER POLICY OPs
@@ -973,7 +1012,8 @@ func RemoveLoadBalancersFromLogicalRouterOps(nbClient libovsdbclient.Client, ops
 
 func getNATMutableFields(nat *nbdb.NAT) []interface{} {
 	return []interface{}{&nat.Type, &nat.ExternalIP, &nat.LogicalIP, &nat.LogicalPort, &nat.ExternalMAC,
-		&nat.ExternalIDs, &nat.Match, &nat.Options, &nat.ExternalPortRange, &nat.GatewayPort, &nat.Priority}
+		&nat.ExternalIDs, &nat.Match, &nat.Options, &nat.ExternalPortRange, &nat.GatewayPort, &nat.Priority,
+		&nat.ExemptedExtIPs, &nat.AllowedExtIPs}
 }
 
 func buildNAT(
@@ -1037,6 +1077,38 @@ func BuildSNATWithMatch(
 		logicalIPStr = logicalIP.String()
 	}
 	return buildNAT(nbdb.NATTypeSNAT, externalIPStr, logicalIPStr, logicalPort, "", externalIDs, match)
+}
+
+// BuildSNATWithExemptedExtIPs builds a logical router SNAT with exempted external IPs
+func BuildSNATWithExemptedExtIPs(
+	externalIP *net.IP,
+	logicalIP *net.IPNet,
+	logicalPort string,
+	externalIDs map[string]string,
+	match string,
+	exemptedExtIPs string,
+) *nbdb.NAT {
+	nat := BuildSNATWithMatch(externalIP, logicalIP, logicalPort, externalIDs, match)
+	if exemptedExtIPs != "" {
+		nat.ExemptedExtIPs = &exemptedExtIPs
+	}
+	return nat
+}
+
+// BuildSNATWithAllowedExtIPs builds a logical router SNAT with allowed external IPs.
+func BuildSNATWithAllowedExtIPs(
+	externalIP *net.IP,
+	logicalIP *net.IPNet,
+	logicalPort string,
+	externalIDs map[string]string,
+	match string,
+	allowedExtIPs string,
+) *nbdb.NAT {
+	nat := BuildSNATWithMatch(externalIP, logicalIP, logicalPort, externalIDs, match)
+	if allowedExtIPs != "" {
+		nat.AllowedExtIPs = &allowedExtIPs
+	}
+	return nat
 }
 
 // BuildDNATAndSNAT builds a logical router DNAT/SNAT
@@ -1116,6 +1188,16 @@ func isEquivalentNAT(existing *nbdb.NAT, searched *nbdb.NAT) bool {
 		if foundValue, found := existing.ExternalIDs[externalIdKey]; !found || foundValue != externalIdValue {
 			return false
 		}
+	}
+
+	if searched.AllowedExtIPs != nil &&
+		(existing.AllowedExtIPs == nil || *searched.AllowedExtIPs != *existing.AllowedExtIPs) {
+		return false
+	}
+
+	if searched.ExemptedExtIPs != nil &&
+		(existing.ExemptedExtIPs == nil || *searched.ExemptedExtIPs != *existing.ExemptedExtIPs) {
+		return false
 	}
 
 	return true

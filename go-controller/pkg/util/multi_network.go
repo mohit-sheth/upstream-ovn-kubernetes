@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -18,14 +21,14 @@ import (
 	"golang.org/x/exp/maps"
 
 	corev1 "k8s.io/api/core/v1"
-	k8sapitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	knet "k8s.io/utils/net"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
 )
 
 var (
@@ -57,19 +60,19 @@ type NetInfo interface {
 	AllowsPersistentIPs() bool
 	PhysicalNetworkName() string
 	Transport() string
+	OutboundSNAT() string
 	EVPNVTEPName() string
 	EVPNMACVRFVNI() int32
 	EVPNMACVRFRouteTarget() string
+	EVPNMACVRFVID() int
 	EVPNIPVRFVNI() int32
 	EVPNIPVRFRouteTarget() string
+	EVPNIPVRFVID() int
 	GetNodeGatewayIP(hostSubnet *net.IPNet) *net.IPNet
 	GetNodeManagementIP(hostSubnet *net.IPNet) *net.IPNet
 
 	// dynamic information, can change over time
-	GetNADs() []string
-	EqualNADs(nads ...string) bool
-	HasNADKey(nadKey string) bool
-	HasNAD(nadName string) bool
+
 	// GetPodNetworkAdvertisedVRFs returns the target VRFs where the pod network
 	// is advertised per node, through a map of node names to slice of VRFs.
 	GetPodNetworkAdvertisedVRFs() map[string][]string
@@ -100,6 +103,7 @@ type NetInfo interface {
 	GetNetworkScopedExtPortName(bridgeID, nodeName string) string
 	GetNetworkScopedLoadBalancerName(lbName string) string
 	GetNetworkScopedLoadBalancerGroupName(lbGroupName string) string
+	GetNetworkScopedRouterToSwitchPortName(nodeName string) string
 
 	// GetNetInfo is an identity method used to get the specific NetInfo
 	// implementation
@@ -242,8 +246,10 @@ type mutableNetInfo struct {
 	podNetworkAdvertisements map[string][]string
 	eipAdvertisements        map[string][]string
 
-	// information generated from previous fields, not used in comparisons
+	// subnets can be added for Layer3 networks
+	subnets []config.CIDRNetworkEntry
 
+	// information generated from previous fields, not used in comparisons
 	// namespaces from nads
 	namespaces sets.Set[string]
 }
@@ -278,11 +284,14 @@ func (l *mutableNetInfo) equals(r *mutableNetInfo) bool {
 	defer l.RUnlock()
 	r.RLock()
 	defer r.RUnlock()
+
+	lessCIDR := func(a, b config.CIDRNetworkEntry) bool { return a.String() < b.String() }
 	return reflect.DeepEqual(l.id, r.id) &&
 		reflect.DeepEqual(l.tunnelKeys, r.tunnelKeys) &&
 		reflect.DeepEqual(l.nads, r.nads) &&
 		reflect.DeepEqual(l.podNetworkAdvertisements, r.podNetworkAdvertisements) &&
-		reflect.DeepEqual(l.eipAdvertisements, r.eipAdvertisements)
+		reflect.DeepEqual(l.eipAdvertisements, r.eipAdvertisements) &&
+		cmp.Equal(l.subnets, r.subnets, cmpopts.SortSlices(lessCIDR))
 }
 
 func (l *mutableNetInfo) copyFrom(r *mutableNetInfo) {
@@ -296,6 +305,7 @@ func (l *mutableNetInfo) copyFrom(r *mutableNetInfo) {
 	aux.nads = r.nads.Clone()
 	aux.setPodNetworkAdvertisedOnVRFs(r.podNetworkAdvertisements)
 	aux.setEgressIPAdvertisedAtNodes(r.eipAdvertisements)
+	aux.subnets = append([]config.CIDRNetworkEntry(nil), r.subnets...)
 	aux.namespaces = r.namespaces.Clone()
 	r.RUnlock()
 	l.Lock()
@@ -305,6 +315,7 @@ func (l *mutableNetInfo) copyFrom(r *mutableNetInfo) {
 	l.nads = aux.nads
 	l.podNetworkAdvertisements = aux.podNetworkAdvertisements
 	l.eipAdvertisements = aux.eipAdvertisements
+	l.subnets = aux.subnets
 	l.namespaces = aux.namespaces
 }
 
@@ -402,43 +413,6 @@ func (nInfo *mutableNetInfo) GetEgressIPAdvertisedNodes() []string {
 	return maps.Keys(nInfo.eipAdvertisements)
 }
 
-// GetNADs returns all the NADs associated with this network
-func (nInfo *mutableNetInfo) GetNADs() []string {
-	nInfo.RLock()
-	defer nInfo.RUnlock()
-	return nInfo.getNads().UnsortedList()
-}
-
-// EqualNADs checks if the NADs associated with nInfo are the same as the ones
-// passed in the nads slice.
-func (nInfo *mutableNetInfo) EqualNADs(nads ...string) bool {
-	nInfo.RLock()
-	defer nInfo.RUnlock()
-	if nInfo.getNads().Len() != len(nads) {
-		return false
-	}
-	return nInfo.getNads().HasAll(nads...)
-}
-
-// HasNADKey returns true if the given NADKey (perhaps with index) exists, used
-// to check if the network needs to be plumbed over
-func (nInfo *mutableNetInfo) HasNADKey(nadKey string) bool {
-	nadName, _, err := GetNadFromIndexedNADKey(nadKey)
-	if err != nil {
-		return false
-	}
-
-	return nInfo.HasNAD(nadName)
-}
-
-// HasNAD returns true if the given NAD exists, used
-// to check if the network needs to be plumbed over
-func (nInfo *mutableNetInfo) HasNAD(nadName string) bool {
-	nInfo.RLock()
-	defer nInfo.RUnlock()
-	return nInfo.getNads().Has(nadName)
-}
-
 // SetNADs replaces the NADs associated with the network
 func (nInfo *mutableNetInfo) SetNADs(nadNames ...string) {
 	nInfo.Lock()
@@ -498,6 +472,8 @@ func (nInfo *mutableNetInfo) getNamespaces() sets.Set[string] {
 }
 
 func (nInfo *mutableNetInfo) GetNADNamespaces() []string {
+	nInfo.RLock()
+	defer nInfo.RUnlock()
 	return nInfo.getNamespaces().UnsortedList()
 }
 
@@ -586,6 +562,10 @@ func (nInfo *DefaultNetInfo) GetNetworkScopedLoadBalancerName(lbName string) str
 
 func (nInfo *DefaultNetInfo) GetNetworkScopedLoadBalancerGroupName(lbGroupName string) string {
 	return nInfo.GetNetworkScopedName(lbGroupName)
+}
+
+func (nInfo *DefaultNetInfo) GetNetworkScopedRouterToSwitchPortName(nodeName string) string {
+	return types.RouterToSwitchPrefix + nInfo.GetNetworkScopedSwitchName(nodeName)
 }
 
 func (nInfo *DefaultNetInfo) canReconcile(netInfo NetInfo) bool {
@@ -693,7 +673,12 @@ func (nInfo *DefaultNetInfo) PhysicalNetworkName() string {
 
 // Transport returns the transport protocol for east-west traffic
 func (nInfo *DefaultNetInfo) Transport() string {
-	return ""
+	return config.Default.Transport
+}
+
+// OutboundSNAT() string returns the outbound SNAT configuration for the default network when using no-overlay transport.
+func (nInfo *DefaultNetInfo) OutboundSNAT() string {
+	return config.NoOverlay.OutboundSNAT
 }
 
 // EVPNVTEPName returns empty as EVPN is not supported on the default network
@@ -721,6 +706,16 @@ func (nInfo *DefaultNetInfo) EVPNIPVRFRouteTarget() string {
 	return ""
 }
 
+// EVPNMACVRFVID returns 0 as EVPN is not supported on the default network
+func (nInfo *DefaultNetInfo) EVPNMACVRFVID() int {
+	return 0
+}
+
+// EVPNIPVRFVID returns 0 as EVPN is not supported on the default network
+func (nInfo *DefaultNetInfo) EVPNIPVRFVID() int {
+	return 0
+}
+
 func (nInfo *DefaultNetInfo) GetNodeGatewayIP(hostSubnet *net.IPNet) *net.IPNet {
 	return GetNodeGatewayIfAddr(hostSubnet)
 }
@@ -743,7 +738,6 @@ type userDefinedNetInfo struct {
 	allowPersistentIPs bool
 
 	ipv4mode, ipv6mode    bool
-	subnets               []config.CIDRNetworkEntry
 	excludeSubnets        []*net.IPNet
 	reservedSubnets       []*net.IPNet
 	infrastructureSubnets []*net.IPNet
@@ -754,8 +748,9 @@ type userDefinedNetInfo struct {
 	defaultGatewayIPs   []net.IP
 	managementIPs       []net.IP
 
-	transport string
-	evpn      *ovncnitypes.EVPNConfig
+	transport    string
+	evpn         *ovncnitypes.EVPNConfig
+	outboundSNAT string
 }
 
 func (nInfo *userDefinedNetInfo) GetNetInfo() NetInfo {
@@ -844,6 +839,18 @@ func (nInfo *userDefinedNetInfo) GetNetworkScopedLoadBalancerGroupName(lbGroupNa
 	return nInfo.GetNetworkScopedName(lbGroupName)
 }
 
+// GetNetworkScopedRouterToSwitchPortName returns the port name from router to switch.
+// For Layer2 topology, this is the transit router to switch port (trtos-).
+// For Layer3 topology, this is the router to switch port (rtos-).
+// Not Applicable for Localnet topology.
+func (nInfo *userDefinedNetInfo) GetNetworkScopedRouterToSwitchPortName(nodeName string) string {
+	switchName := nInfo.GetNetworkScopedSwitchName(nodeName)
+	if nInfo.TopologyType() == types.Layer2Topology {
+		return types.TransitRouterToSwitchPrefix + switchName
+	}
+	return types.RouterToSwitchPrefix + switchName
+}
+
 // getPrefix returns if the logical entities prefix for this network
 func (nInfo *userDefinedNetInfo) getPrefix() string {
 	return GetUserDefinedNetworkPrefix(nInfo.netName)
@@ -877,6 +884,11 @@ func (nInfo *userDefinedNetInfo) PhysicalNetworkName() string {
 // Transport returns the transport protocol for east-west traffic
 func (nInfo *userDefinedNetInfo) Transport() string {
 	return nInfo.transport
+}
+
+// OutboundSNAT() string returns the outbound SNAT configuration for this network when using no-overlay transport.
+func (nInfo *userDefinedNetInfo) OutboundSNAT() string {
+	return nInfo.outboundSNAT
 }
 
 // EVPNVTEPName returns the name of the VTEP CR for EVPN
@@ -919,6 +931,22 @@ func (nInfo *userDefinedNetInfo) EVPNIPVRFRouteTarget() string {
 	return nInfo.evpn.IPVRF.RouteTarget
 }
 
+// EVPNMACVRFVID returns the MAC-VRF VID for EVPN
+func (nInfo *userDefinedNetInfo) EVPNMACVRFVID() int {
+	if nInfo.evpn == nil || nInfo.evpn.MACVRF == nil {
+		return 0
+	}
+	return nInfo.evpn.MACVRF.VID
+}
+
+// EVPNIPVRFVID returns the IP-VRF VID for EVPN
+func (nInfo *userDefinedNetInfo) EVPNIPVRFVID() int {
+	if nInfo.evpn == nil || nInfo.evpn.IPVRF == nil {
+		return 0
+	}
+	return nInfo.evpn.IPVRF.VID
+}
+
 func (nInfo *userDefinedNetInfo) GetNodeGatewayIP(hostSubnet *net.IPNet) *net.IPNet {
 	if IsPreconfiguredUDNAddressesEnabled() && nInfo.TopologyType() == types.Layer2Topology && nInfo.IsPrimaryNetwork() {
 		isIPV6 := knet.IsIPv6CIDR(hostSubnet)
@@ -950,7 +978,9 @@ func (nInfo *userDefinedNetInfo) IPMode() (bool, bool) {
 
 // Subnets returns the Subnets value
 func (nInfo *userDefinedNetInfo) Subnets() []config.CIDRNetworkEntry {
-	return nInfo.subnets
+	nInfo.RLock()
+	defer nInfo.RUnlock()
+	return append([]config.CIDRNetworkEntry(nil), nInfo.mutableNetInfo.subnets...)
 }
 
 // ExcludeSubnets returns the ExcludeSubnets value
@@ -999,6 +1029,10 @@ func (nInfo *userDefinedNetInfo) TransitSubnets() []*net.IPNet {
 	return nInfo.transitSubnets
 }
 
+func (nInfo *userDefinedNetInfo) reconcile(other NetInfo) {
+	nInfo.mutableNetInfo.reconcile(other)
+}
+
 func (nInfo *userDefinedNetInfo) canReconcile(other NetInfo) bool {
 	if (nInfo == nil) != (other == nil) {
 		return false
@@ -1032,7 +1066,7 @@ func (nInfo *userDefinedNetInfo) canReconcile(other NetInfo) bool {
 	if nInfo.physicalNetworkName != other.PhysicalNetworkName() {
 		return false
 	}
-	if nInfo.transport != other.Transport() {
+	if nInfo.Transport() != other.Transport() {
 		return false
 	}
 	if nInfo.EVPNVTEPName() != other.EVPNVTEPName() {
@@ -1050,10 +1084,17 @@ func (nInfo *userDefinedNetInfo) canReconcile(other NetInfo) bool {
 	if nInfo.EVPNIPVRFRouteTarget() != other.EVPNIPVRFRouteTarget() {
 		return false
 	}
+	if nInfo.OutboundSNAT() != other.OutboundSNAT() {
+		return false
+	}
 
 	lessCIDRNetworkEntry := func(a, b config.CIDRNetworkEntry) bool { return a.String() < b.String() }
-	if !cmp.Equal(nInfo.subnets, other.Subnets(), cmpopts.SortSlices(lessCIDRNetworkEntry)) {
-		return false
+	if !cmp.Equal(nInfo.Subnets(), other.Subnets(), cmpopts.SortSlices(lessCIDRNetworkEntry)) {
+		// For Layer3 topology, adding subnets is considered compatible and reconcilable
+		// CRD validation ensures only subnet additions are allowed
+		if nInfo.topology != types.Layer3Topology {
+			return false
+		}
 	}
 
 	lessIPNet := func(a, b net.IPNet) bool { return a.String() < b.String() }
@@ -1083,7 +1124,6 @@ func (nInfo *userDefinedNetInfo) copy() *userDefinedNetInfo {
 		allowPersistentIPs:    nInfo.allowPersistentIPs,
 		ipv4mode:              nInfo.ipv4mode,
 		ipv6mode:              nInfo.ipv6mode,
-		subnets:               nInfo.subnets,
 		excludeSubnets:        nInfo.excludeSubnets,
 		reservedSubnets:       nInfo.reservedSubnets,
 		infrastructureSubnets: nInfo.infrastructureSubnets,
@@ -1094,6 +1134,7 @@ func (nInfo *userDefinedNetInfo) copy() *userDefinedNetInfo {
 		managementIPs:         nInfo.managementIPs,
 		transport:             nInfo.transport,
 		evpn:                  nInfo.evpn,
+		outboundSNAT:          nInfo.outboundSNAT,
 	}
 	// copy mutables
 	c.mutableNetInfo.copyFrom(&nInfo.mutableNetInfo)
@@ -1114,14 +1155,15 @@ func newLayer3NetConfInfo(netconf *ovncnitypes.NetConf) (MutableNetInfo, error) 
 		netName:        netconf.Name,
 		primaryNetwork: netconf.Role == types.NetworkRolePrimary,
 		topology:       types.Layer3Topology,
-		subnets:        subnets,
 		joinSubnets:    joinSubnets,
 		mtu:            netconf.MTU,
 		transport:      netconf.Transport,
 		evpn:           netconf.EVPN,
+		outboundSNAT:   netconf.OutboundSNAT,
 		mutableNetInfo: mutableNetInfo{
-			id:   types.InvalidID,
-			nads: sets.Set[string]{},
+			id:      types.InvalidID,
+			nads:    sets.Set[string]{},
+			subnets: append([]config.CIDRNetworkEntry(nil), subnets...),
 		},
 	}
 	ni.ipv4mode, ni.ipv6mode = getIPMode(subnets)
@@ -1184,7 +1226,6 @@ func newLayer2NetConfInfo(netconf *ovncnitypes.NetConf) (MutableNetInfo, error) 
 		netName:               netconf.Name,
 		primaryNetwork:        netconf.Role == types.NetworkRolePrimary,
 		topology:              types.Layer2Topology,
-		subnets:               subnets,
 		joinSubnets:           joinSubnets,
 		transitSubnets:        transitSubnets,
 		excludeSubnets:        excludes,
@@ -1197,8 +1238,9 @@ func newLayer2NetConfInfo(netconf *ovncnitypes.NetConf) (MutableNetInfo, error) 
 		transport:             netconf.Transport,
 		evpn:                  netconf.EVPN,
 		mutableNetInfo: mutableNetInfo{
-			id:   types.InvalidID,
-			nads: sets.Set[string]{},
+			id:      types.InvalidID,
+			nads:    sets.Set[string]{},
+			subnets: append([]config.CIDRNetworkEntry(nil), subnets...),
 		},
 	}
 	ni.ipv4mode, ni.ipv6mode = getIPMode(subnets)
@@ -1223,15 +1265,15 @@ func newLocalnetNetConfInfo(netconf *ovncnitypes.NetConf) (MutableNetInfo, error
 	ni := &userDefinedNetInfo{
 		netName:             netconf.Name,
 		topology:            types.LocalnetTopology,
-		subnets:             subnets,
 		excludeSubnets:      excludes,
 		mtu:                 netconf.MTU,
 		vlan:                uint(netconf.VLANID),
 		allowPersistentIPs:  netconf.AllowPersistentIPs,
 		physicalNetworkName: netconf.PhysicalNetworkName,
 		mutableNetInfo: mutableNetInfo{
-			id:   types.InvalidID,
-			nads: sets.Set[string]{},
+			id:      types.InvalidID,
+			nads:    sets.Set[string]{},
+			subnets: append([]config.CIDRNetworkEntry(nil), subnets...),
 		},
 	}
 	ni.ipv4mode, ni.ipv6mode = getIPMode(subnets)
@@ -1526,6 +1568,28 @@ func ValidateNetConf(nadName string, netconf *ovncnitypes.NetConf) error {
 		return fmt.Errorf("error parsing Network Attachment Definition %s: %w", nadName, ErrorUnsupportedIPAMKey)
 	}
 
+	// Validate transport if specified
+	if netconf.Transport != "" &&
+		netconf.Transport != types.NetworkTransportNoOverlay &&
+		netconf.Transport != types.NetworkTransportEVPN {
+		return fmt.Errorf("invalid transport %q: must be one of %q", netconf.Transport, []string{
+			types.NetworkTransportNoOverlay,
+			types.NetworkTransportEVPN,
+		})
+	}
+	if netconf.OutboundSNAT != "" {
+		if netconf.Transport != types.NetworkTransportNoOverlay {
+			return fmt.Errorf("outboundSNAT is only valid when transport is %q", types.NetworkTransportNoOverlay)
+		}
+		if netconf.OutboundSNAT != types.NoOverlaySNATEnabled &&
+			netconf.OutboundSNAT != types.NoOverlaySNATDisabled {
+			return fmt.Errorf("invalid outboundSNAT %q: must be one of %q", netconf.OutboundSNAT, []string{
+				types.NoOverlaySNATEnabled,
+				types.NoOverlaySNATDisabled,
+			})
+		}
+	}
+
 	if netconf.JoinSubnet != "" && netconf.Topology == types.LocalnetTopology {
 		return fmt.Errorf("localnet topology does not allow specifying join-subnet as services are not supported")
 	}
@@ -1624,7 +1688,7 @@ func SubnetOverlapCheck(netconf *ovncnitypes.NetConf) (*net.IPNet, *net.IPNet, e
 	return nil, nil, nil
 }
 
-// GetPodNADToNetworkMapping sees if the given pod needs to plumb over this given network specified by netconf,
+// getPodNADToNetworkMapping sees if the given pod needs to plumb over this given network specified by netconf,
 // and return the matching NetworkSelectionElement if any exists.
 //
 // Return value:
@@ -1636,7 +1700,14 @@ func SubnetOverlapCheck(netconf *ovncnitypes.NetConf) (*net.IPNet, *net.IPNet, e
 //	        additional attachments of the same NAD on the same pod. Note multiple NADs of the same
 //	        network are allowed on one pod. They can be of different NAD Name or the same NAD Name.
 //		error:  error in case of failure
-func GetPodNADToNetworkMapping(pod *corev1.Pod, nInfo NetInfo) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
+//
+// getNetworkNameForNADKey may be nil only for default-network lookups.
+// For UDN lookups, it must be provided to validate NAD keys.
+func getPodNADToNetworkMapping(
+	pod *corev1.Pod,
+	nInfo NetInfo,
+	getNetworkNameForNADKey func(nadKey string) string,
+) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
 	if pod.Spec.HostNetwork {
 		return false, nil, nil
 	}
@@ -1655,6 +1726,40 @@ func GetPodNADToNetworkMapping(pod *corev1.Pod, nInfo NetInfo) (bool, map[string
 		return true, networkSelections, nil
 	}
 
+	if getNetworkNameForNADKey == nil {
+		return false, nil, fmt.Errorf("UDN mapping requires a network resolver")
+	}
+
+	return getPodNADToNetworkMappingWithPredicate(pod, nInfo, func(nadName string) bool {
+		networkName := getNetworkNameForNADKey(nadName)
+		return networkName != "" && networkName == nInfo.GetNetworkName()
+	})
+}
+
+// GetUDNPodNADToNetworkMapping returns pod network selections for the specified UDN,
+// validating NAD keys via the provided resolver.
+func GetUDNPodNADToNetworkMapping(
+	pod *corev1.Pod,
+	nInfo NetInfo,
+	getNetworkNameForNADKey func(nadKey string) string,
+) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
+	if getNetworkNameForNADKey == nil {
+		return false, nil, fmt.Errorf("UDN mapping requires a network resolver")
+	}
+	return getPodNADToNetworkMapping(pod, nInfo, getNetworkNameForNADKey)
+}
+
+// GetDefaultPodNADToNetworkMapping returns default-network selections for a pod.
+// This should only be used by the default network controller.
+func GetDefaultPodNADToNetworkMapping(pod *corev1.Pod) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
+	return getPodNADToNetworkMapping(pod, &DefaultNetInfo{}, nil)
+}
+
+func getPodNADToNetworkMappingWithPredicate(
+	pod *corev1.Pod,
+	nInfo NetInfo,
+	nadMatches func(nadKey string) bool,
+) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
 	// For non-default network controller, try to see if its name exists in the Pod's k8s.v1.cni.cncf.io/networks, if no,
 	// return false;
 	allNetworks, err := GetK8sPodAllNetworkSelections(pod)
@@ -1662,25 +1767,27 @@ func GetPodNADToNetworkMapping(pod *corev1.Pod, nInfo NetInfo) (bool, map[string
 		return false, nil, err
 	}
 
+	networkSelections := map[string]*nettypes.NetworkSelectionElement{}
 	// Get map of per-NAD NetworkSelectionElement, if there are multiple NetworkSelectionElements of the same NAD,
 	// calculate numbers of network elements of that same NAD.
 	nNADs := map[string]int{}
 	for _, network := range allNetworks {
-		nadName := GetNADName(network.Namespace, network.Name)
-		if nInfo.HasNAD(nadName) {
-			if nInfo.IsPrimaryNetwork() {
-				return false, nil, fmt.Errorf("unexpected primary network %q specified with a NetworkSelectionElement %+v", nInfo.GetNetworkName(), network)
-			}
-
-			// for multiple NetworkSelectionElements of the same NAD, set its nadName to indexed nadName
-			cnt := nNADs[nadName]
-			if cnt > 0 && nInfo.TopologyType() == types.LocalnetTopology {
-				return false, nil, fmt.Errorf("pod %s/%s cannot have same networkSelectionElement %s of type %s multiple times",
-					pod.Namespace, pod.Name, nadName, types.LocalnetTopology)
-			}
-			nNADs[nadName] = cnt + 1
-			networkSelections[GetIndexedNADKey(nadName, cnt)] = network
+		nadNamespace := network.Namespace
+		if nadNamespace == "" {
+			nadNamespace = pod.Namespace
 		}
+		nadName := GetNADName(nadNamespace, network.Name)
+		if !nadMatches(nadName) {
+			continue
+		}
+		if nInfo.IsPrimaryNetwork() {
+			return false, nil, fmt.Errorf("unexpected primary network %q specified with a NetworkSelectionElement %+v", nInfo.GetNetworkName(), network)
+		}
+
+		// for multiple NetworkSelectionElements of the same NAD, set its nadName to indexed nadName
+		cnt := nNADs[nadName]
+		nNADs[nadName] = cnt + 1
+		networkSelections[GetIndexedNADKey(nadName, cnt)] = network
 	}
 
 	if len(networkSelections) == 0 {
@@ -1704,11 +1811,18 @@ func overrideActiveNSEWithDefaultNSE(defaultNSE, activeNSE *nettypes.NetworkSele
 	return nil
 }
 
-// GetPodNADToNetworkMappingWithActiveNetwork will call `GetPodNADToNetworkMapping` passing "nInfo" which correspond
-// to the NetInfo representing the NAD, the resulting NetworkSelectingElements will be decorated with the ones
-// from found active network
-func GetPodNADToNetworkMappingWithActiveNetwork(pod *corev1.Pod, nInfo NetInfo, activeNetwork NetInfo) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
-	on, networkSelections, err := GetPodNADToNetworkMapping(pod, nInfo)
+// GetPodNADToNetworkMappingWithActiveNetwork resolves the pod's NAD attachments using nInfo (the NAD's NetInfo).
+// If activeNetwork is provided and matches nInfo's network, it adds the namespace's active primary NAD selection
+// (and any requested default-network IP/MAC details) to the returned mapping.
+func GetPodNADToNetworkMappingWithActiveNetwork(
+	pod *corev1.Pod,
+	nInfo NetInfo,
+	activeNetwork NetInfo,
+	getNetworkNameForNADKey func(nadKey string) string,
+	getPrimaryNADForNamespace func(namespace string) (string, error),
+) (bool, map[string]*nettypes.NetworkSelectionElement, error) {
+	// scan network selection elements using the resolver to validate attachments
+	on, networkSelections, err := getPodNADToNetworkMapping(pod, nInfo, getNetworkNameForNADKey)
 	if err != nil {
 		return false, nil, err
 	}
@@ -1723,15 +1837,24 @@ func GetPodNADToNetworkMappingWithActiveNetwork(pod *corev1.Pod, nInfo NetInfo, 
 		return on, networkSelections, nil
 	}
 
-	// Add the active network to the NSE map if it is configured
-	activeNetworkNADs := activeNetwork.GetNADs()
-	if len(activeNetworkNADs) < 1 {
-		return false, nil, fmt.Errorf("missing NADs at active network %q for namespace %q", activeNetwork.GetNetworkName(), pod.Namespace)
+	if getPrimaryNADForNamespace == nil {
+		return false, nil, fmt.Errorf("missing primary NAD resolver for network %q", nInfo.GetNetworkName())
 	}
 
-	activeNADKey := getNADWithNamespace(activeNetworkNADs, pod.Namespace)
-	if activeNADKey == nil {
-		return false, nil, fmt.Errorf("no active NAD found for namespace %q", pod.Namespace)
+	primaryNADKey, err := getPrimaryNADForNamespace(pod.Namespace)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to get primary NAD for namespace %q: %w", pod.Namespace, err)
+	}
+	if primaryNADKey == types.DefaultNetworkName {
+		return false, nil, fmt.Errorf("no primary NAD found for namespace %q", pod.Namespace)
+	}
+	if networkName := getNetworkNameForNADKey(primaryNADKey); networkName == "" || networkName != nInfo.GetNetworkName() {
+		return false, nil, fmt.Errorf("primary NAD %q does not match network %q for namespace %q", primaryNADKey, nInfo.GetNetworkName(), pod.Namespace)
+	}
+
+	nadNamespace, nadName, err := cache.SplitMetaNamespaceKey(primaryNADKey)
+	if err != nil {
+		return false, nil, fmt.Errorf("failed to split NAD key %q: %w", primaryNADKey, err)
 	}
 
 	if len(networkSelections) == 0 {
@@ -1739,8 +1862,8 @@ func GetPodNADToNetworkMappingWithActiveNetwork(pod *corev1.Pod, nInfo NetInfo, 
 	}
 
 	activeNSE := &nettypes.NetworkSelectionElement{
-		Namespace: activeNADKey.Namespace,
-		Name:      activeNADKey.Name,
+		Namespace: nadNamespace,
+		Name:      nadName,
 	}
 
 	isPersistentIPsPrimaryNetwork := nInfo.IsPrimaryNetwork() && AllowsPersistentIPs(nInfo)
@@ -1778,24 +1901,8 @@ func GetPodNADToNetworkMappingWithActiveNetwork(pod *corev1.Pod, nInfo NetInfo, 
 		}
 	}
 
-	networkSelections[activeNADKey.String()] = activeNSE
+	networkSelections[primaryNADKey] = activeNSE
 	return true, networkSelections, nil
-}
-
-// getNADWithNamespace returns the first occurrence of NAD key with the given namespace name.
-func getNADWithNamespace(nads []string, targetNamespace string) *k8sapitypes.NamespacedName {
-	for _, nad := range nads {
-		nsName := strings.Split(nad, "/")
-		if len(nsName) != 2 {
-			continue
-		}
-		ns, name := nsName[0], nsName[1]
-		if ns != targetNamespace {
-			continue
-		}
-		return &k8sapitypes.NamespacedName{Namespace: ns, Name: name}
-	}
-	return nil
 }
 
 func IsMultiNetworkPoliciesSupportEnabled() bool {
@@ -1816,6 +1923,10 @@ func IsRouteAdvertisementsEnabled() bool {
 	return config.OVNKubernetesFeature.EnableMultiNetwork && config.OVNKubernetesFeature.EnableRouteAdvertisements
 }
 
+func IsEVPNEnabled() bool {
+	return IsRouteAdvertisementsEnabled() && config.Gateway.Mode == config.GatewayModeLocal && config.OVNKubernetesFeature.EnableEVPN
+}
+
 // IsPreconfiguredUDNAddressesEnabled indicates if user defined IPs / MAC
 // addresses can be set in primary UDNs
 func IsPreconfiguredUDNAddressesEnabled() bool {
@@ -1827,8 +1938,7 @@ func DoesNetworkRequireIPAM(netInfo NetInfo) bool {
 }
 
 func DoesNetworkRequireTunnelIDs(netInfo NetInfo) bool {
-	// Layer2Topology with IC require that we allocate tunnel IDs for each pod
-	return netInfo.TopologyType() == types.Layer2Topology && config.OVNKubernetesFeature.EnableInterconnect
+	return netInfo.TopologyType() == types.Layer2Topology
 }
 
 func AllowsPersistentIPs(netInfo NetInfo) bool {
@@ -1845,8 +1955,29 @@ func AllowsPersistentIPs(netInfo NetInfo) bool {
 	}
 }
 
+// IsPodNetworkAdvertisedAtNode returns true if the pod network is advertised at
+// the given node. For networks with NoOverlay or EVPN transport this always
+// returns true as those networks should always be advertised.
 func IsPodNetworkAdvertisedAtNode(netInfo NetInfo, node string) bool {
-	return len(netInfo.GetPodNetworkAdvertisedOnNodeVRFs(node)) > 0
+	switch netInfo.Transport() {
+	case types.NetworkTransportNoOverlay, types.NetworkTransportEVPN:
+		return true
+	default:
+		return len(netInfo.GetPodNetworkAdvertisedOnNodeVRFs(node)) > 0
+	}
+}
+
+// IsPodNetworkAdvertisedAtNodeDefaultVRF returns true if the pod network is
+// advertised at the given node in the default VRF. For networks with EVPN
+// transport this always returns false as those networks should not be
+// advertised in the default VRF.
+func IsPodNetworkAdvertisedAtNodeDefaultVRF(netInfo NetInfo, node string) bool {
+	switch netInfo.Transport() {
+	case types.NetworkTransportEVPN:
+		return false
+	default:
+		return slices.Contains(netInfo.GetPodNetworkAdvertisedOnNodeVRFs(node), types.DefaultNetworkName)
+	}
 }
 
 func GetNetworkVRFName(netInfo NetInfo) string {
@@ -1929,50 +2060,67 @@ func CanServeNamespace(network NetInfo, namespace string) bool {
 //	is otherwise locked for all intents and purposes.
 //
 // (4) "none" if the pod has no networks on this controller
-func GetNetworkRole(controllerNetInfo NetInfo, getActiveNetworkForNamespace func(namespace string) (NetInfo, error), pod *corev1.Pod) (string, error) {
+func GetNetworkRole(
+	controllerNetInfo NetInfo,
+	getPrimaryNADForNamespace func(namespace string) (string, error),
+	getNetworkNameForNADKey func(nadKey string) string,
+	pod *corev1.Pod,
+) (string, error) {
+	if getNetworkNameForNADKey == nil {
+		return "", fmt.Errorf("getNetworkNameForNADKey is required")
+	}
 
 	// no network segmentation enabled, and is default controller, must be default network
 	if !IsNetworkSegmentationSupportEnabled() && controllerNetInfo.IsDefault() {
 		return types.NetworkRolePrimary, nil
 	}
 
-	var activeNetwork NetInfo
 	var err error
 	// controller is serving primary network or is default, we need to get the active network
 	if controllerNetInfo.IsPrimaryNetwork() || controllerNetInfo.IsDefault() {
-		activeNetwork, err = getActiveNetworkForNamespace(pod.Namespace)
+		// check if primary NAD exists
+		primaryNAD, err := getPrimaryNADForNamespace(pod.Namespace)
 		if err != nil {
 			return "", err
 		}
-
-		// if active network for pod matches controller network, then primary interface is handled by this controller
-		if activeNetwork.GetNetworkName() == controllerNetInfo.GetNetworkName() {
-			return types.NetworkRolePrimary, nil
-		}
-
-		// otherwise, if this is the default controller, and the pod active network does not match the default network
-		// we know the role for this default controller is infra locked
 		if controllerNetInfo.IsDefault() {
+			if primaryNAD == types.DefaultNetworkName {
+				return types.NetworkRolePrimary, nil
+			}
 			return types.NetworkRoleInfrastructure, nil
 		}
 
-		// this is a primary network controller, and it does not match the pod's active network
-		// the controller must not be serving this pod
+		if networkName := getNetworkNameForNADKey(primaryNAD); networkName != "" {
+			if networkName == controllerNetInfo.GetNetworkName() {
+				return types.NetworkRolePrimary, nil
+			}
+			return types.NetworkRoleNone, nil
+		}
+
+		// this is a primary network controller, and it does not have the pod's primary NAD
 		return types.NetworkRoleNone, nil
 	}
 
 	// at this point the controller must be a secondary network
-	on, _, err := GetPodNADToNetworkMapping(pod, controllerNetInfo.GetNetInfo())
+	allNetworks, err := GetK8sPodAllNetworkSelections(pod)
 	if err != nil {
 		return "", fmt.Errorf("failed to get pod network mapping: %w", err)
 	}
-
-	if !on {
-		return types.NetworkRoleNone, nil
+	for _, network := range allNetworks {
+		nadNamespace := network.Namespace
+		if nadNamespace == "" {
+			nadNamespace = pod.Namespace
+		}
+		nadKey := GetNADName(nadNamespace, network.Name)
+		networkName := getNetworkNameForNADKey(nadKey)
+		if networkName == "" {
+			continue
+		}
+		if networkName == controllerNetInfo.GetNetworkName() {
+			return types.NetworkRoleSecondary, nil
+		}
 	}
-
-	// must be secondary role
-	return types.NetworkRoleSecondary, nil
+	return types.NetworkRoleNone, nil
 }
 
 // (C)UDN network name generation functions must ensure the absence of name conflicts between all (C)UDNs.
@@ -2182,4 +2330,62 @@ func getFirstNonOverlappingSubnet(subnet1, subnet2 *net.IPNet, netMask net.IPMas
 	baseSubnetLastIP := GetLastIPOfSubnet(baseSubnet, 0)
 	nextIP := iputils.NextIP(baseSubnetLastIP.IP)
 	return &net.IPNet{IP: nextIP, Mask: netMask}
+}
+
+func CheckNetworksOverlap(netInfos []NetInfo) error {
+	subnets := make([][]*net.IPNet, len(netInfos))
+	for i, ni := range netInfos {
+		subnets[i] = GetAllClusterSubnetsFromEntries(ni.Subnets())
+	}
+	for i, si := range subnets {
+		for j := 0; j < i; j++ {
+			sj := subnets[j]
+			if NetworksOverlap(si, sj) {
+				return fmt.Errorf("network %s with subnets %v and network %s with subnets %v",
+					netInfos[i].GetNetworkName(), si, netInfos[j].GetNetworkName(), sj)
+			}
+		}
+	}
+	return nil
+}
+
+// CheckSubnetOverlapWithNetworks checks whether the given subnets overlap with
+// any of the given networks' subnets, transit subnets, or join subnets.
+// subnetsName is used in the error message to explain where those subnets are coming from.
+func CheckSubnetOverlapWithNetworks(subnets []*net.IPNet, subnetsName string, networks []NetInfo) error {
+	for _, network := range networks {
+		if NetworksOverlap(subnets, GetAllClusterSubnetsFromEntries(network.Subnets())) {
+			return fmt.Errorf("network %s with subnets %v and %s with subnets %v",
+				network.GetNetworkName(), network.Subnets(), subnetsName, subnets)
+		}
+		if NetworksOverlap(subnets, network.TransitSubnets()) {
+			return fmt.Errorf("network %s with transit subnets %v and %s with subnets %v",
+				network.GetNetworkName(), network.TransitSubnets(), subnetsName, subnets)
+		}
+		if NetworksOverlap(subnets, network.JoinSubnets()) {
+			return fmt.Errorf("network %s with join subnets %v and %s with subnets %v",
+				network.GetNetworkName(), network.JoinSubnets(), subnetsName, subnets)
+		}
+	}
+	return nil
+}
+
+// CheckSubnetOverlapWithClusterSubnets checks whether the given subnet overlaps with
+// cluster service CIDRs, or masquerade subnets.
+// subnetsName is used in the error message to explain where those subnets are coming from.
+func CheckSubnetOverlapWithClusterSubnets(subnets []*net.IPNet, subnetsName string) error {
+	if NetworksOverlap(subnets, config.Kubernetes.ServiceCIDRs) {
+		return fmt.Errorf("%s with subnets %v and %s with subnets %v",
+			config.ConfigSubnetService, config.Kubernetes.ServiceCIDRs,
+			subnetsName, subnets)
+	}
+	_, v4MasqueradeCIDR, _ := net.ParseCIDR(config.Gateway.V4MasqueradeSubnet)
+	_, v6MasqueradeCIDR, _ := net.ParseCIDR(config.Gateway.V6MasqueradeSubnet)
+
+	if NetworksOverlap(subnets, []*net.IPNet{v4MasqueradeCIDR, v6MasqueradeCIDR}) {
+		return fmt.Errorf("%s with subnets %v and %s with subnets %v",
+			config.ConfigSubnetMasquerade, []*net.IPNet{v4MasqueradeCIDR, v6MasqueradeCIDR},
+			subnetsName, subnets)
+	}
+	return nil
 }

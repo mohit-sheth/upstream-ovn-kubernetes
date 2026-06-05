@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 //go:build linux
 // +build linux
 
@@ -17,18 +20,20 @@ import (
 	"testing"
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
-	cni020 "github.com/containernetworking/cni/pkg/types/020"
+	current "github.com/containernetworking/cni/pkg/types/100"
 	nadapi "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	utiltesting "k8s.io/client-go/util/testing"
 
-	"github.com/ovn-kubernetes/libovsdb/client"
-
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func clientDoCNI(t *testing.T, client *http.Client, req *Request) ([]byte, int) {
@@ -52,16 +57,7 @@ func clientDoCNI(t *testing.T, client *http.Client, req *Request) ([]byte, int) 
 	return body, resp.StatusCode
 }
 
-var expectedResult cnitypes.Result
-
-func serverHandleCNI(request *PodRequest, _ *ClientSet, _ *KubeAPIAuth, _ networkmanager.Interface, _ client.Client) ([]byte, error) {
-	if request.Command == CNIAdd {
-		return json.Marshal(&expectedResult)
-	} else if request.Command == CNIDel || request.Command == CNIUpdate || request.Command == CNICheck {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("unhandled CNI command %v", request.Command)
-}
+var expectedResult *current.Result
 
 func makeCNIArgs(namespace, name string) string {
 	return fmt.Sprintf("K8S_POD_NAMESPACE=%s;K8S_POD_NAME=%s", namespace, name)
@@ -83,11 +79,32 @@ func TestCNIServer(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 	socketPath := filepath.Join(tmpDir, serverSocketName)
-	fakeClient := fake.NewSimpleClientset()
+	// Pre-create the pod with the OVN pod-networks annotation so
+	// GetPodWithAnnotations resolves immediately during cmdAdd. The IP in the
+	// annotation flows through getCNIResult into the response we'll verify.
+	podObj := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       k8stypes.UID("test-pod-uid"),
+			Annotations: map[string]string{
+				"k8s.ovn.org/pod-networks": `{"default":{"ip_address":"10.0.0.2/24","mac_address":"0a:58:0a:00:00:02"}}`,
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: nodeName},
+	}
+	fakeClient := fake.NewSimpleClientset(podObj)
 	err = config.PrepareTestConfig()
 	if err != nil {
 		t.Fatalf("failed to prepare test config: %v", err)
 	}
+
+	// Stub out the host-side interface ops so getCNIResult can run without
+	// touching real netns/OVS. Restore at end.
+	origInterfaceOps := podRequestInterfaceOps
+	podRequestInterfaceOps = &podRequestInterfaceOpsStub{}
+	defer func() { podRequestInterfaceOps = origInterfaceOps }()
+
 	fakeClientset := &util.OVNNodeClientset{
 		KubeClient: fakeClient,
 	}
@@ -103,12 +120,11 @@ func TestCNIServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to call newOVSClientWithExternalIDs: %v", err)
 	}
-	s, err := NewCNIServer(wf, fakeClient, networkmanager.Default().Interface(), ovsClient)
+	s, err := NewCNIServer(wf, fakeClient, networkmanager.Default().Interface(), ovsClient, nil)
 	if err != nil {
 		t.Fatalf("error creating CNI server: %v", err)
 	}
 	// override request handler
-	s.handlePodRequestFunc = serverHandleCNI
 	if err := s.Start(tmpDir); err != nil {
 		t.Fatalf("error starting CNI server: %v", err)
 	}
@@ -121,20 +137,24 @@ func TestCNIServer(t *testing.T) {
 		},
 	}
 
+	// Build the expected Result that getCNIResult would return for the pod
+	// annotation above + the podRequestInterfaceOps.
 	expectedIP, expectedNet, _ := net.ParseCIDR("10.0.0.2/24")
-	expectedResult = &cni020.Result{
-		IP4: &cni020.IPConfig{
-			IP: net.IPNet{
-				IP:   expectedIP,
-				Mask: expectedNet.Mask,
-			},
+	expectedResult = &current.Result{
+		Interfaces: []*current.Interface{
+			{Name: "host_eth0"},
+			{Name: "eth0", Sandbox: "/var/run/netns/" + namespace + "_" + name},
 		},
+		IPs: []*current.IPConfig{{
+			Interface: current.Int(1),
+			Address:   net.IPNet{IP: expectedIP, Mask: expectedNet.Mask},
+		}},
 	}
 
 	type testcase struct {
 		name        string
 		request     *Request
-		result      cnitypes.Result
+		result      *current.Result
 		errorPrefix string
 	}
 
@@ -166,7 +186,7 @@ func TestCNIServer(t *testing.T) {
 				Config: []byte(cniConfig),
 				DeviceInfo: nadapi.DeviceInfo{
 					Type:    "vdpa",
-					Version: "1.0.0",
+					Version: "1.1.0",
 					Vdpa: &nadapi.VdpaDevice{
 						ParentDevice: "vdpa:0000:65:00.3",
 						Driver:       "vhost",
@@ -215,6 +235,17 @@ func TestCNIServer(t *testing.T) {
 					"CNI_ARGS":        makeCNIArgs(namespace, name),
 				},
 				Config: []byte(cniConfig_40),
+			},
+			result: nil,
+		},
+		// STATUS request
+		{
+			name: "STATUS",
+			request: &Request{
+				Env: map[string]string{
+					"CNI_COMMAND": string(CNIStatus),
+				},
+				Config: []byte(cniConfig),
 			},
 			result: nil,
 		},
@@ -269,12 +300,12 @@ func TestCNIServer(t *testing.T) {
 				t.Fatalf("[%s] expected status %v but got %v", tc.name, http.StatusOK, code)
 			}
 			if tc.result != nil {
-				result := &cni020.Result{}
-				if err := json.Unmarshal(body, result); err != nil {
+				resp := &Response{}
+				if err := json.Unmarshal(body, resp); err != nil {
 					t.Fatalf("[%s] failed to unmarshal response '%s': %v", tc.name, string(body), err)
 				}
-				if !reflect.DeepEqual(result, tc.result) {
-					t.Fatalf("[%s] expected result %v but got %v", tc.name, tc.result, result)
+				if !reflect.DeepEqual(resp.Result, tc.result) {
+					t.Fatalf("[%s] expected result %v but got %v", tc.name, tc.result, resp.Result)
 				}
 			}
 		} else {
@@ -286,4 +317,109 @@ func TestCNIServer(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestCNIServerStatusNotReady(t *testing.T) {
+	tmpDir, err := utiltesting.MkTmpdir("cniserver-status")
+	if err != nil {
+		t.Fatalf("failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	socketPath := filepath.Join(tmpDir, serverSocketName)
+	fakeClient := fake.NewSimpleClientset()
+	err = config.PrepareTestConfig()
+	if err != nil {
+		t.Fatalf("failed to prepare test config: %v", err)
+	}
+	fakeClientset := &util.OVNNodeClientset{
+		KubeClient: fakeClient,
+	}
+	wf, err := factory.NewNodeWatchFactory(fakeClientset, nodeName)
+	if err != nil {
+		t.Fatalf("failed to create watch factory: %v", err)
+	}
+	if err := wf.Start(); err != nil {
+		t.Fatalf("failed to start watch factory: %v", err)
+	}
+
+	ovsClient, err := newOVSClientWithExternalIDs(map[string]string{})
+	if err != nil {
+		t.Fatalf("failed to call newOVSClientWithExternalIDs: %v", err)
+	}
+	dpuHealth := &fakeDPUHealth{ready: false, reason: "lease expired"}
+	s, err := NewCNIServer(wf, fakeClient, networkmanager.Default().Interface(), ovsClient, dpuHealth)
+	if err != nil {
+		t.Fatalf("error creating CNI server: %v", err)
+	}
+	if err := s.Start(tmpDir); err != nil {
+		t.Fatalf("error starting CNI server: %v", err)
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Dial: func(_, _ string) (net.Conn, error) {
+				return net.Dial("unix", socketPath)
+			},
+		},
+	}
+
+	testcases := []struct {
+		name       string
+		mode       string
+		expectCode int
+		expectErr  bool
+	}{
+		{
+			name:       "DPUHostNotReady",
+			mode:       ovntypes.NodeModeDPUHost,
+			expectCode: http.StatusBadRequest,
+			expectErr:  true,
+		},
+		{
+			name:       "FullModeIgnoresHealth",
+			mode:       ovntypes.NodeModeFull,
+			expectCode: http.StatusOK,
+			expectErr:  false,
+		},
+	}
+
+	for _, tc := range testcases {
+		config.OvnKubeNode.Mode = tc.mode
+		body, code := clientDoCNI(t, client, &Request{
+			Env: map[string]string{
+				"CNI_COMMAND": string(CNIStatus),
+			},
+			Config: []byte(cniConfig),
+		})
+		if code != tc.expectCode {
+			t.Fatalf("[%s] expected status %v but got %v", tc.name, tc.expectCode, code)
+		}
+		if tc.expectErr {
+			var cniErr cnitypes.Error
+			if err := json.Unmarshal(body, &cniErr); err != nil {
+				t.Fatalf("[%s] failed to unmarshal error response: %v", tc.name, err)
+			}
+			if cniErr.Code != 50 {
+				t.Fatalf("[%s] expected CNI error code 50 but got %d", tc.name, cniErr.Code)
+			}
+			if !strings.Contains(cniErr.Msg, dpuNotReadyMsg) {
+				t.Fatalf("[%s] expected error to mention DPU not ready, got %q", tc.name, cniErr.Msg)
+			}
+			if !strings.Contains(cniErr.Msg, "lease expired") {
+				t.Fatalf("[%s] expected error to include lease reason, got %q", tc.name, cniErr.Msg)
+			}
+		} else if len(body) != 0 {
+			t.Fatalf("[%s] expected empty body for success, got %q", tc.name, string(body))
+		}
+	}
+}
+
+type fakeDPUHealth struct {
+	ready  bool
+	reason string
+}
+
+func (f *fakeDPUHealth) Ready() (bool, string) {
+	return f.ready, f.reason
 }

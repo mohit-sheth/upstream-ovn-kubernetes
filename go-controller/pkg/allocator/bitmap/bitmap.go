@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /*
 Copyright 2015 The Kubernetes Authors.
 
@@ -21,7 +24,7 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cryptorand"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cryptorand"
 )
 
 // AllocationBitmap is a contiguous block of resources that can be allocated atomically.

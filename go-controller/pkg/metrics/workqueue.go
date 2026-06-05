@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 /*
 Modified from k8s.io/component-base/metrics/prometheus/workqueue/metrics.go
 
@@ -79,7 +82,7 @@ var (
 		Help: "Total number of retries handled by workqueue",
 	}, []string{"name"})
 
-	metrics = []prometheus.Collector{
+	workqueueMetrics = []prometheus.Collector{
 		depth, adds, latency, workDuration, unfinished, longestRunningProcessor, retries,
 	}
 )
@@ -124,7 +127,7 @@ func registerWorkqueueMetrics(namespace, subsystem string) {
 		fmt.Sprintf("%s_%s_workqueue_", namespace, subsystem),
 		prometheus.DefaultRegisterer,
 	)
-	for _, m := range metrics {
+	for _, m := range workqueueMetrics {
 		registry.MustRegister(m)
 	}
 }

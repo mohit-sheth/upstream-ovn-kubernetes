@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
@@ -12,8 +15,8 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 
-	types "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	util "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	types "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	util "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func findUserDefinedNetworkVRFTableIDs(coreclient *corev1client.CoreV1Client, restconfig *rest.Config, ovnNamespace string) (string, error) {

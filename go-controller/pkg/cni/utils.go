@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cni
 
 import (
@@ -10,16 +13,15 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // wait on a certain pod annotation related condition
 // return error to abort the retry attempt
 type podAnnotWaitCond = func(*corev1.Pod, string) (*util.PodAnnotation, bool, error)
 
-// isOvnReady is a wait condition for OVN master to set pod-networks annotation
+// isOvnReady is a wait condition for the pod-networks annotation to be set.
 func isOvnReady(pod *corev1.Pod, nadKey string) (*util.PodAnnotation, bool, error) {
 	podNADAnnotation, err := util.UnmarshalPodAnnotation(pod.Annotations, nadKey)
 	if err != nil {
@@ -31,8 +33,8 @@ func isOvnReady(pod *corev1.Pod, nadKey string) (*util.PodAnnotation, bool, erro
 	return podNADAnnotation, true, nil
 }
 
-// isDPUReady is a wait condition which waits for OVN master to set pod-networks annotation and
-// ovnkube running on DPU to set connection-status pod annotation and its status is Ready
+// isDPUReady is a wait condition for the pod-networks annotation and the DPU
+// connection-status pod annotation to be set to Ready.
 func isDPUReady(annotCondFn podAnnotWaitCond, nadKey string) podAnnotWaitCond {
 	return func(pod *corev1.Pod, nad string) (annotation *util.PodAnnotation, ready bool, err error) {
 		if annotCondFn != nil {
@@ -142,7 +144,7 @@ func PodAnnotation2PodInfo(podAnnotation map[string]string, podNADAnnotation *ut
 		RoutableMTU:          config.Default.RoutableMTU, // TBD, configurable for UDNs?
 		Ingress:              ingress,
 		Egress:               egress,
-		IsDPUHostMode:        config.OvnKubeNode.Mode == types.NodeModeDPUHost,
+		IsDPUHostMode:        config.IsModeDPUHost(),
 		PodUID:               podUID,
 		NetdevName:           netdevname,
 		NetName:              netName,

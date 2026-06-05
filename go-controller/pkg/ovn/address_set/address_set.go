@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package addressset
 
 import (
@@ -10,10 +13,10 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 // DISCLAIMER: OVN AddressSets support adding addresses of types
@@ -55,6 +58,8 @@ type AddressSetFactory interface {
 type AddressSet interface {
 	// GetASHashNames returns the hashed name for v6 and v4 addressSets
 	GetASHashNames() (string, string)
+	// GetASUUID returns the UUIDs for v6 and v4 addressSets
+	GetASUUID() (string, string)
 	// GetName returns the descriptive name of the address set
 	GetName() string
 	// AddAddresses adds the slice of addresses to the address set
@@ -394,6 +399,18 @@ func (as *ovnAddressSets) GetASHashNames() (string, string) {
 	return v4AS, v6AS
 }
 
+func (as *ovnAddressSets) GetASUUID() (string, string) {
+	var v4AS string
+	var v6AS string
+	if as.v4 != nil {
+		v4AS = as.v4.uuid
+	}
+	if as.v6 != nil {
+		v6AS = as.v6.uuid
+	}
+	return v4AS, v6AS
+}
+
 func (as *ovnAddressSets) GetName() string {
 	return as.name
 }
@@ -534,6 +551,11 @@ func (as *ovnAddressSets) Destroy() error {
 // given addresses, disregarding existing state.
 func (as *ovnAddressSet) setAddresses(addresses []string) error {
 	uniqAddresses := getUniqueAddresses(addresses)
+
+	if as.hasOnlyAddresses(uniqAddresses...) {
+		return nil
+	}
+
 	addrset := nbdb.AddressSet{
 		UUID:      as.uuid,
 		Name:      as.hashName,
@@ -598,7 +620,47 @@ func (as *ovnAddressSet) hasAddresses(addresses ...string) bool {
 		return false
 	}
 
-	return sets.NewString(existingAddresses...).HasAll(addresses...)
+	for _, address := range addresses {
+		found := false
+		for _, existingAddress := range existingAddresses {
+			if existingAddress == address {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// hasOnlyAddresses returns true if an address set contains only the given Addresses and no more
+func (as *ovnAddressSet) hasOnlyAddresses(addresses ...string) bool {
+	existingAddresses, err := as.getAddresses()
+	if err != nil {
+		return false
+	}
+
+	if len(existingAddresses) != len(addresses) {
+		return false
+	}
+
+	for _, address := range addresses {
+		found := false
+		for _, existingAddress := range existingAddresses {
+			if existingAddress == address {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+
+	return true
 }
 
 // deleteAddresses removes selected addresses from the existing address_set

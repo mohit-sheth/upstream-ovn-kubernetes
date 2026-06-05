@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package managementport
 
 import (
@@ -9,9 +12,9 @@ import (
 	listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 type udnManagementPort interface {
@@ -95,7 +98,7 @@ func NewUDNManagementPortController(
 
 	// in full mode and MgmtPortDPResourceName is empty, OVS internal management port can be used, otherwise, management
 	// port must has been allocated for this network
-	if (config.OvnKubeNode.Mode != types.NodeModeFull || config.OvnKubeNode.MgmtPortDPResourceName != "") && mpdev == nil {
+	if ((config.IsModeDPU() || config.IsModeDPUHost()) || config.OvnKubeNode.MgmtPortDPResourceName != "") && mpdev == nil {
 		return nil, fmt.Errorf("management port resource not allocated for network %s (annotation missing or invalid)", cfg.GetNetworkName())
 	}
 
@@ -110,7 +113,7 @@ func NewUDNManagementPortController(
 		ports: map[string]udnManagementPort{},
 	}
 
-	if config.OvnKubeNode.Mode == types.NodeModeFull && config.OvnKubeNode.MgmtPortDPResourceName == "" {
+	if config.IsModeFull() && config.OvnKubeNode.MgmtPortDPResourceName == "" {
 		c.ports[ovsPort] = newUDNManagementPortOVS(cfg, mgmtIfName)
 		return c, nil
 	}
@@ -125,7 +128,7 @@ func NewUDNManagementPortController(
 		c.ports[netdevPort] = newUDNManagementPortNetdev(cfg, mgmtIfName, mpdev.DeviceId)
 		c.ports[representorPort] = newUDNManagementPortRep(cfg, repDeviceName)
 	case types.NodeModeDPU:
-		repDeviceName, err := util.GetSriovnetOps().GetVfRepresentorDPU(fmt.Sprintf("%d", mpdev.PfId), fmt.Sprintf("%d", mpdev.FuncId))
+		repDeviceName, err := util.GetDPUOps().GetPortRepresentor(fmt.Sprintf("%d", mpdev.PfId), fmt.Sprintf("%d", mpdev.FuncId))
 		if err != nil {
 			return nil, fmt.Errorf("failed to get management port representor for pfID %v vfID %v network %s: %v",
 				mpdev.PfId, mpdev.FuncId, netInfo.GetNetworkName(), err)
@@ -195,7 +198,7 @@ func syncUDNManagementPort(cfg *udnManagementPortConfig, mgmtIfName string, mpde
 		"--columns", "name",
 		"find", "Interface", "type=internal", fmt.Sprintf("name=%s", mgmtIfName))
 
-	if config.OvnKubeNode.MgmtPortDPResourceName == "" && config.OvnKubeNode.Mode == types.NodeModeFull {
+	if config.OvnKubeNode.MgmtPortDPResourceName == "" && config.IsModeFull() {
 		// expect internal OVS management port interface
 		if ovsRepIfName != "" {
 			klog.V(5).Infof("Expected management port OVS internal interface, delete stale management port representor %s for network %s",
@@ -222,7 +225,7 @@ func syncUDNManagementPort(cfg *udnManagementPortConfig, mgmtIfName string, mpde
 		return nil
 	}
 
-	if config.OvnKubeNode.Mode != types.NodeModeDPU {
+	if config.IsModeDPUHost() || config.IsModeFull() {
 		if ovsInternalIfName != "" {
 			klog.V(5).Infof("Expected management port OVS netdev interface, bring down stale management port internal interface %s for network %s",
 				mgmtIfName, cfg.GetNetworkName())
@@ -255,8 +258,8 @@ func syncUDNManagementPort(cfg *udnManagementPortConfig, mgmtIfName string, mpde
 				}
 			}
 		}
-	} else if ovsRepIfName != "" {
-		repDeviceName, _ := util.GetSriovnetOps().GetVfRepresentorDPU(fmt.Sprintf("%d", mpdev.PfId), fmt.Sprintf("%d", mpdev.FuncId))
+	} else if config.IsModeDPU() && ovsRepIfName != "" {
+		repDeviceName, _ := util.GetDPUOps().GetPortRepresentor(fmt.Sprintf("%d", mpdev.PfId), fmt.Sprintf("%d", mpdev.FuncId))
 		if repDeviceName != ovsRepIfName {
 			err = DeleteManagementPortRepInterface(cfg.GetNetworkName(), ovsRepIfName, ovsRepIfName)
 			if err != nil {

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package egressservice
 
 import (
@@ -15,12 +18,11 @@ import (
 
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const EgressServiceServedPodsAddrSetName = "egresssvc-served-pods"
@@ -130,9 +132,8 @@ func (c *Controller) onServiceDelete(obj interface{}) {
 }
 
 // Returns cluster-networked endpoints for the given service grouped by IPv4/IPv6.
-// When IC is disabled v[4|6]LocalEndpoints contains all service endpoints and v[4|6]RemoteEndpoints is not set
-// When IC is enabled v[4|6]LocalEndpoints contains endpoints hosted in the local zone and
-// v[4|6]RemoteEndpoints contains endpoints hosted in remote zones
+// v[4|6]LocalEndpoints contains endpoints hosted in the local zone.
+// v[4|6]RemoteEndpoints contains endpoints hosted in remote zones.
 func (c *Controller) allEndpointsFor(svc *corev1.Service) (
 	v4LocalEndpoints, v6LocalEndpoints, v4RemoteEndpoints, v6RemoteEndpoints sets.Set[string],
 	err error) {
@@ -168,18 +169,14 @@ func (c *Controller) allEndpointsFor(svc *corev1.Service) (
 				// ignore endpoints without a node
 				continue
 			}
-			isEpLocal := true
-			if config.OVNKubernetesFeature.EnableInterconnect {
-				var zoneKnown bool
-				isEpLocal, zoneKnown = c.nodesZoneState[*ep.NodeName]
-				if !zoneKnown {
-					klog.Errorf("Failed to get the zone for %v", ep)
-					continue
-				}
+			isEpLocal, zoneKnown := c.nodesZoneState[*ep.NodeName]
+			if !zoneKnown {
+				klog.Errorf("Failed to get the zone for %v", ep)
+				continue
 			}
 			for _, ip := range ep.Addresses {
 				ipStr := utilnet.ParseIPSloppy(ip).String()
-				if !services.IsHostEndpoint(ipStr) {
+				if !services.IsHostEndpoint(ipStr, &util.DefaultNetInfo{}) {
 					if isEpLocal {
 						localEndpoints.Insert(ipStr)
 					} else {

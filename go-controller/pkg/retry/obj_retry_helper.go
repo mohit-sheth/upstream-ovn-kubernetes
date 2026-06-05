@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package retry
 
 import (
@@ -83,6 +86,16 @@ func SetRetryObjWithNoBackoff(key string, r *RetryFramework) {
 			r.setRetryObjWithNoBackoff(entry)
 		}
 	})
+}
+
+func GetBackoffFromRetryObj(key string, r *RetryFramework) time.Duration {
+	r.retryEntries.LockKey(key)
+	defer r.retryEntries.UnlockKey(key)
+	obj, exists := r.getRetryObj(key)
+	if exists && obj != nil {
+		return obj.backoff
+	}
+	return -1
 }
 
 func InitRetryObjWithAdd(obj interface{}, key string, r *RetryFramework) {

@@ -11,6 +11,8 @@ The goal of this feature is to limit `ovnkube-node` permissions to the minimum r
 We will mimic the [approach used by kubelet](https://kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping/) in which every node has a unique identity, 
 and its API write requests are verified using a [NodeRestriction](https://github.com/kubernetes/kubernetes/blob/9e0569f2ed3934060fabe51be4e15232bbea3877/plugin/pkg/admission/noderestriction/admission.go) validating admission webhook.
 
+Always check the dependencies on the [Requirements page](../requirements.md)
+
 ## Per-node client certificates
 
 This process mimics the [bootstrap initialization](https://kubernetes.io/docs/reference/access-authn-authz/kubelet-tls-bootstrapping/#bootstrap-initialization) in kubelet.
@@ -46,7 +48,7 @@ This is intentional as it helps ensure that the certificate rotation works seaml
 
 ## Validating Admission Webhook
 
-The feature introduces a validating webhook for updates to `pod/status` (Interconnect only) and `node/status`.\
+The feature introduces a validating webhook for updates to `pod/status` and `node/status`.\
 The `ovnkube-node` pod exclusively updates the status on both resources, so it is sufficient to verify only update requests.\
 The webhooks include the following checks for each `ovnkube-node` pod:
 - Modifying annotations on pods hosted on its own node.
@@ -55,14 +57,13 @@ The webhooks include the following checks for each `ovnkube-node` pod:
 - Not modifying anything other than annotations.
 
 The allowed annotations list contains both common and feature specific values:
- - By default, the webhook will verify a set of common node annotations used in all deployments.
- - When `enable-interconnect` parameter is provided the webhook will validate additional pod/node annotations set by the ovnkube-node component in interconnect environments.
- - When `enable-hybrid-overlay` parameter is provided the webhook will validate additional node annotations set by the ovnkube-node component in interconnect environments.
+ - By default, the webhook will verify common node annotations and pod/node annotations set by the ovnkube-node component.
+ - When `enable-hybrid-overlay` parameter is provided the webhook will validate additional node annotations set by the ovnkube-node component for hybrid overlay.
 
 The specific annotation values can be found in `go-controller/pkg/ovnwebhook/nodeadmission.go` and `go-controller/pkg/ovnwebhook/podadmission.go` files.
 
-Some of the allowed annotations have additional checks; for instance, the IP addresses in [k8s.ovn.org/pod-networks](https://github.com/ovn-org/ovn-kubernetes/blob/5d56a53df520a085e629cdc71be092afed9c3f0f/go-controller/pkg/util/pod_annotation.go#L20-L51)
-must match the node's [k8s.ovn.org/node-subnets](https://github.com/ovn-org/ovn-kubernetes/blob/5d56a53df520a085e629cdc71be092afed9c3f0f/go-controller/pkg/util/subnet_annotations.go#L15-L39) networks.
+Some of the allowed annotations have additional checks; for instance, the IP addresses in [k8s.ovn.org/pod-networks](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/5d56a53df520a085e629cdc71be092afed9c3f0f/go-controller/pkg/util/pod_annotation.go#L20-L51)
+must match the node's [k8s.ovn.org/node-subnets](https://github.com/ovn-kubernetes/ovn-kubernetes/blob/5d56a53df520a085e629cdc71be092afed9c3f0f/go-controller/pkg/util/subnet_annotations.go#L15-L39) networks.
 
 
 ## DaemonSet

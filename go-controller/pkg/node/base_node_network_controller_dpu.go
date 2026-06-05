@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -11,12 +14,12 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 // Check if the Pod is ready so that we can add its associated DPU to br-int.
@@ -70,7 +73,7 @@ func (bnnc *BaseNodeNetworkController) delDPUPodForNAD(pod *corev1.Pod, dpuCD *u
 			errs = append(errs, fmt.Errorf("failed to remove the old DPU connection status annotation for %s: %v", podDesc, err))
 		}
 	}
-	vfRepName, err := util.GetSriovnetOps().GetVfRepresentorDPU(dpuCD.PfId, dpuCD.VfId)
+	vfRepName, err := util.GetDPUOps().GetPortRepresentor(dpuCD.PfId, dpuCD.VfId)
 	if err != nil {
 		errs = append(errs, fmt.Errorf("failed to get old VF representor for %s, dpuConnDetail %+v Representor port may have been deleted: %v", podDesc, dpuCD, err))
 	} else {
@@ -122,9 +125,22 @@ func (bnnc *BaseNodeNetworkController) watchPodsDPU() (*factory.Handler, error) 
 						klog.Errorf("Failed looking for the active network for namespace %s: %v", pod.Namespace, err)
 						return
 					}
+					if activeNetwork == nil {
+						klog.Errorf("Unable to find an active network for namespace %s", pod.Namespace)
+						return
+					}
+					if activeNetwork.GetNetworkName() != netName {
+						return
+					}
 				}
 
-				on, networkMap, err := util.GetPodNADToNetworkMappingWithActiveNetwork(pod, bnnc.GetNetInfo(), activeNetwork)
+				on, networkMap, err := util.GetPodNADToNetworkMappingWithActiveNetwork(
+					pod,
+					bnnc.GetNetInfo(),
+					activeNetwork,
+					bnnc.networkManager.GetNetworkNameForNADKey,
+					bnnc.networkManager.GetPrimaryNADForNamespace,
+				)
 				if err != nil || !on {
 					if err != nil {
 						// configuration error, no need to retry, do not return error
@@ -245,7 +261,7 @@ func (bnnc *BaseNodeNetworkController) addRepPort(pod *corev1.Pod, dpuCD *util.D
 
 	nadKey := ifInfo.NADKey
 	podDesc := fmt.Sprintf("pod %s/%s for NAD %s", pod.Namespace, pod.Name, nadKey)
-	vfRepName, err := util.GetSriovnetOps().GetVfRepresentorDPU(dpuCD.PfId, dpuCD.VfId)
+	vfRepName, err := util.GetDPUOps().GetPortRepresentor(dpuCD.PfId, dpuCD.VfId)
 	if err != nil {
 		klog.Infof("Failed to get VF representor for %s dpuConnDetail %+v: %v", podDesc, dpuCD, err)
 		return err
@@ -254,14 +270,15 @@ func (bnnc *BaseNodeNetworkController) addRepPort(pod *corev1.Pod, dpuCD *util.D
 	// set netdevName so OVS interface can be added with external_ids:vf-netdev-name, and is able to
 	// be part of healthcheck.
 	ifInfo.NetdevName = vfRepName
-	vfPciAddress, err := util.GetSriovnetOps().GetPCIFromDeviceName(vfRepName)
+	deviceID, err := util.GetDPUOps().GetDeviceAddress(vfRepName)
 	if err != nil {
 		klog.Infof("Failed to get PCI address of VF rep %s: %v", vfRepName, err)
 		return err
 	}
 
 	klog.Infof("Adding VF representor %s for %s", vfRepName, podDesc)
-	err = cni.ConfigureOVS(context.TODO(), pod.Namespace, pod.Name, "", vfRepName, ifInfo, dpuCD.SandboxId, vfPciAddress, getter)
+	err = cni.ConfigureOVS(context.TODO(), pod.Namespace, pod.Name, "", vfRepName, ifInfo, dpuCD.SandboxId,
+		deviceID, false, getter)
 	if err != nil {
 		// Note(adrianc): we are lenient with cleanup in this method as pod is going to be retried anyway.
 		_ = bnnc.delRepPort(pod, dpuCD, vfRepName, nadKey)
@@ -269,28 +286,11 @@ func (bnnc *BaseNodeNetworkController) addRepPort(pod *corev1.Pod, dpuCD *util.D
 	}
 	klog.Infof("Port %s added to bridge br-int", vfRepName)
 
-	link, err := util.GetNetLinkOps().LinkByName(vfRepName)
-	if err != nil {
-		_ = bnnc.delRepPort(pod, dpuCD, vfRepName, nadKey)
-		return fmt.Errorf("failed to get link device for interface %s", vfRepName)
-	}
-
-	if err = util.GetNetLinkOps().LinkSetMTU(link, ifInfo.MTU); err != nil {
-		_ = bnnc.delRepPort(pod, dpuCD, vfRepName, nadKey)
-		return fmt.Errorf("failed to setup representor port. failed to set MTU for interface %s", vfRepName)
-	}
-
-	if err = util.GetNetLinkOps().LinkSetUp(link); err != nil {
-		_ = bnnc.delRepPort(pod, dpuCD, vfRepName, nadKey)
-		return fmt.Errorf("failed to setup representor port. failed to set link up for interface %s", vfRepName)
-	}
-
 	// Update connection-status annotation
 	// TODO(adrianc): we should update Status in case of error as well
 	connStatus := util.DPUConnectionStatus{Status: util.DPUConnectionStatusReady, Reason: ""}
 	err = bnnc.updatePodDPUConnStatusWithRetry(pod, &connStatus, nadKey)
 	if err != nil {
-		_ = util.GetNetLinkOps().LinkSetDown(link)
 		_ = bnnc.delRepPort(pod, dpuCD, vfRepName, nadKey)
 		return fmt.Errorf("failed to setup representor port. failed to set pod annotations. %v", err)
 	}

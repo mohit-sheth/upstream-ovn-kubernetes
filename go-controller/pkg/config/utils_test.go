@@ -1,10 +1,13 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package config
 
 import (
 	"net"
 	"testing"
 
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
 )
 
 func TestParseClusterSubnetEntries(t *testing.T) {

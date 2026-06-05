@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -11,10 +14,10 @@ import (
 	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/deploymentconfig"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/feature"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
-	infraapi "github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
 
 	kapi "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
@@ -27,7 +30,6 @@ import (
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
-	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 	utilnet "k8s.io/utils/net"
 )
 
@@ -99,12 +101,7 @@ var _ = Describe("Network Segmentation: services", feature.NetworkSegmentation, 
 				namespace := f.Namespace.Name
 				jig := e2eservice.NewTestJig(cs, namespace, "udn-service")
 
-				if netConfigParams.topology == "layer2" && !isInterconnectEnabled() {
-					const upstreamIssue = "https://github.com/ovn-org/ovn-kubernetes/issues/4703"
-					e2eskipper.Skipf(
-						"Service e2e tests for layer2 topologies are known to fail on non-IC deployments. Upstream issue: %s", upstreamIssue,
-					)
-				}
+				dynamicUDNEnabled := isDynamicUDNEnabled()
 
 				By("Selecting 3 schedulable nodes")
 				nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), f.ClientSet, 3)
@@ -174,8 +171,10 @@ ips=$(ip -o addr show dev $iface| grep global |awk '{print $4}' | cut -d/ -f1 | 
 				By("Connect to the UDN service nodePort on all 3 nodes from the UDN client pod")
 				checkConnectionToLoadBalancers(f, udnClientPod, udnService, udnServerPod.Name)
 				checkConnectionToNodePort(f, udnClientPod, udnService, &nodes.Items[0], "endpoint node", udnServerPod.Name)
-				checkConnectionToNodePort(f, udnClientPod, udnService, &nodes.Items[1], "other node", udnServerPod.Name)
-				checkConnectionToNodePort(f, udnClientPod, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				if !dynamicUDNEnabled {
+					checkConnectionToNodePort(f, udnClientPod, udnService, &nodes.Items[1], "other node", udnServerPod.Name)
+					checkConnectionToNodePort(f, udnClientPod, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				}
 				By(fmt.Sprintf("Creating a UDN client pod on a different node (%s)", clientNode))
 				udnClientPod2 := e2epod.NewAgnhostPod(namespace, "udn-client2", nil, nil, nil)
 				udnClientPod2.Spec.NodeName = clientNode
@@ -186,14 +185,20 @@ ips=$(ip -o addr show dev $iface| grep global |awk '{print $4}' | cut -d/ -f1 | 
 				checkConnectionToLoadBalancers(f, udnClientPod2, udnService, udnServerPod.Name)
 				checkConnectionToNodePort(f, udnClientPod2, udnService, &nodes.Items[1], "local node", udnServerPod.Name)
 				checkConnectionToNodePort(f, udnClientPod2, udnService, &nodes.Items[0], "server node", udnServerPod.Name)
-				checkConnectionToNodePort(f, udnClientPod2, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				if !dynamicUDNEnabled {
+					checkConnectionToNodePort(f, udnClientPod2, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				}
 
 				By("Connect to the UDN service from the UDN client external container")
 				externalContainer := infraapi.ExternalContainer{Name: "frr"}
-				checkConnectionToLoadBalancersFromExternalContainer(f, externalContainer, udnService, udnServerPod.Name)
+				if !dynamicUDNEnabled {
+					checkConnectionToLoadBalancersFromExternalContainer(f, externalContainer, udnService, udnServerPod.Name)
+				}
 				checkConnectionToNodePortFromExternalContainer(externalContainer, udnService, &nodes.Items[0], "server node", udnServerPod.Name)
-				checkConnectionToNodePortFromExternalContainer(externalContainer, udnService, &nodes.Items[1], "other node", udnServerPod.Name)
-				checkConnectionToNodePortFromExternalContainer(externalContainer, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				if !dynamicUDNEnabled {
+					checkConnectionToNodePortFromExternalContainer(externalContainer, udnService, &nodes.Items[1], "other node", udnServerPod.Name)
+					checkConnectionToNodePortFromExternalContainer(externalContainer, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				}
 
 				// Default network -> UDN
 				// Check that it cannot connect
@@ -216,7 +221,9 @@ ips=$(ip -o addr show dev $iface| grep global |awk '{print $4}' | cut -d/ -f1 | 
 				checkNoConnectionToNodePort(f, defaultClient, udnService, &nodes.Items[1], "local node") // TODO change to checkConnectionToNodePort when we have full UDN support in ovnkube-node
 
 				checkConnectionToNodePort(f, defaultClient, udnService, &nodes.Items[0], "server node", udnServerPod.Name)
-				checkConnectionToNodePort(f, defaultClient, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				if !dynamicUDNEnabled {
+					checkConnectionToNodePort(f, defaultClient, udnService, &nodes.Items[2], "other node", udnServerPod.Name)
+				}
 
 				// UDN -> Default network
 				// Create a backend pod and service in the default network and verify that the client pod in the UDN
@@ -273,7 +280,7 @@ ips=$(ip -o addr show dev $iface| grep global |awk '{print $4}' | cut -d/ -f1 | 
 				networkAttachmentConfigParams{
 					name:     nadName,
 					topology: "layer3",
-					cidr:     joinStrings(userDefinedNetworkIPv4Subnet, userDefinedNetworkIPv6Subnet),
+					cidr:     primaryLayer3MultiCIDRs(),
 					role:     "primary",
 				},
 			),
@@ -304,7 +311,7 @@ ips=$(ip -o addr show dev $iface| grep global |awk '{print $4}' | cut -d/ -f1 | 
 
 })
 
-// TODO Once https://github.com/ovn-org/ovn-kubernetes/pull/4567 merges, use the vendored *TestJig.Run(), which tests
+// TODO Once https://github.com/ovn-kubernetes/ovn-kubernetes/pull/4567 merges, use the vendored *TestJig.Run(), which tests
 // the reachability of a service through its name and through its cluster IP. For now only test the cluster IP.
 
 const OvnNodeIfAddr = "k8s.ovn.org/node-primary-ifaddr"

@@ -1,9 +1,12 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package v1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/types"
 )
 
 // +genclient
@@ -66,6 +69,11 @@ const (
 
 	// EgressIP determines that egress IPs are being advertised.
 	EgressIP AdvertisementType = "EgressIP"
+)
+
+const (
+	// RouteAdvertisementsAccepted is the condition type for RouteAdvertisements acceptance status
+	RouteAdvertisementsAccepted = "Accepted"
 )
 
 // RouteAdvertisementsStatus defines the observed state of RouteAdvertisements.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ops
 
 import (
@@ -6,8 +9,8 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/ovsdb"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
 )
 
 // CreateOrUpdateLoadBalancerGroupOps returns the ops to create or update the
@@ -27,6 +30,16 @@ func CreateOrUpdateLoadBalancerGroupOps(nbClient libovsdbclient.Client, ops []ov
 		return nil, err
 	}
 	return ops, nil
+}
+
+// CreateOrUpdateLoadBalancerGroup creates or updates the provided load balancer group
+func CreateOrUpdateLoadBalancerGroup(nbClient libovsdbclient.Client, group *nbdb.LoadBalancerGroup) error {
+	ops, err := CreateOrUpdateLoadBalancerGroupOps(nbClient, nil, group)
+	if err != nil {
+		return err
+	}
+	_, err = TransactAndCheck(nbClient, ops)
+	return err
 }
 
 // DeleteLoadBalancerGroupsOps DeleteLoadBalncerGroupOps creates the operations for deleting load balancer groups
@@ -104,6 +117,25 @@ func RemoveLoadBalancersFromGroupOps(nbClient libovsdbclient.Client, ops []ovsdb
 }
 
 type loadBalancerGroupPredicate func(*nbdb.LoadBalancerGroup) bool
+
+// GetLoadBalancerGroup looks up a load balancer group from the cache by name (indexed lookup).
+func GetLoadBalancerGroup(nbClient libovsdbclient.Client, lbg *nbdb.LoadBalancerGroup) (*nbdb.LoadBalancerGroup, error) {
+	found := []*nbdb.LoadBalancerGroup{}
+	opModel := operationModel{
+		Model:          lbg,
+		ExistingResult: &found,
+		ErrNotFound:    true,
+		BulkOp:         false,
+	}
+
+	m := newModelClient(nbClient)
+	err := m.Lookup(opModel)
+	if err != nil {
+		return nil, err
+	}
+
+	return found[0], nil
+}
 
 // FindLoadBalancerGroupsWithPredicate looks up load balancer groups from the
 // cache based on a given predicate

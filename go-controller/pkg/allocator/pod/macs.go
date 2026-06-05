@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package pod
 
 import (
@@ -5,25 +8,23 @@ import (
 	"fmt"
 	"net"
 
-	kubevirtv1 "kubevirt.io/api/core/v1"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 	k8snet "k8s.io/utils/net"
 
-	allocmac "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/mac"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kubevirt"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	allocmac "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kubevirt"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // macOwner compose the owner identifier reserved for MAC addresses management.
 // Returns "<ns>/<pod-name>" for regular pods and "<ns>/<vm-name>" for VMs.
 func macOwner(pod *corev1.Pod) string {
-	// Check if this is a VM pod and persistent IPs are enabled
-	if vmName, ok := pod.Labels[kubevirtv1.VirtualMachineNameLabel]; ok {
-		return fmt.Sprintf("%s/%s", pod.Namespace, vmName)
+	vmDescription, err := kubevirt.NewVMDescriptionFromPod(pod)
+	if err == nil && vmDescription != nil {
+		return vmDescription.Key().String()
 	}
 
 	// Default to pod-based identifier
@@ -40,10 +41,10 @@ func (allocator *PodAnnotationAllocator) ReleasePodReservedMacAddress(pod *corev
 	}
 
 	macOwnerID := macOwner(pod)
-	if vmKey := kubevirt.ExtractVMNameFromPod(pod); vmKey != nil {
+	if kubevirt.IsPodOwnedByVirtualMachine(pod) {
 		allVMPodsCompleted, err := kubevirt.AllVMPodsAreCompleted(allocator.podLister, pod)
 		if err != nil {
-			return fmt.Errorf("failed checking all VM %q pods are completed: %v", vmKey, err)
+			return fmt.Errorf("failed checking all VM %q pods are completed: %v", macOwnerID, err)
 		}
 		if !allVMPodsCompleted {
 			klog.V(5).Infof(`Retaining MAC address %q for owner %q on network %q because its in use by another VM pod`,

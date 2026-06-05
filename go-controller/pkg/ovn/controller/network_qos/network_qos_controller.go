@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package networkqos
 
 import (
@@ -23,14 +26,16 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	networkqosapi "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
-	networkqosclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned"
-	networkqosinformer "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/informers/externalversions/networkqos/v1alpha1"
-	networkqoslister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/listers/networkqos/v1alpha1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	addressset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/address_set"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/syncmap"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	controllerutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	networkqosapi "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
+	networkqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned"
+	networkqosinformer "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/informers/externalversions/networkqos/v1alpha1"
+	networkqoslister "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/listers/networkqos/v1alpha1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	addressset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/address_set"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/syncmap"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -49,7 +54,8 @@ type Controller struct {
 	// (values are default-network-controller, secondary-network-controller etc..)
 	controllerName string
 	util.NetInfo
-	nqosClientSet networkqosclientset.Interface
+	networkManager networkmanager.Interface
+	nqosClientSet  networkqosclientset.Interface
 
 	// libovsdb northbound client interface
 	nbClient      libovsdbclient.Client
@@ -135,13 +141,19 @@ func NewController(
 	podInformer corev1informers.PodInformer,
 	nodeInformer corev1informers.NodeInformer,
 	nadInformer nadinformerv1.NetworkAttachmentDefinitionInformer,
+	networkManager networkmanager.Interface,
 	addressSetFactory addressset.AddressSetFactory,
 	isPodScheduledinLocalZone func(*corev1.Pod) bool,
 	zone string) (*Controller, error) {
 
+	if netInfo.IsUserDefinedNetwork() && networkManager == nil {
+		return nil, fmt.Errorf("network manager is required for network %q", netInfo.GetNetworkName())
+	}
+
 	c := &Controller{
 		controllerName:            controllerName,
 		NetInfo:                   netInfo,
+		networkManager:            networkManager,
 		nbClient:                  nbClient,
 		nqosClientSet:             nqosClient,
 		addressSetFactory:         addressSetFactory,
@@ -155,7 +167,7 @@ func NewController(
 	c.nqosLister = nqosInformer.Lister()
 	c.nqosCacheSynced = nqosInformer.Informer().HasSynced
 	c.nqosQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controllerutil.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "networkQoS"},
 	)
 	_, err := nqosInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -171,7 +183,7 @@ func NewController(
 	c.nqosNamespaceLister = namespaceInformer.Lister()
 	c.nqosNamespaceSynced = namespaceInformer.Informer().HasSynced
 	c.nqosNamespaceQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[*eventData[*corev1.Namespace]](1*time.Second, 5*time.Second, 5),
+		controllerutil.DefaultRateLimiter[*eventData[*corev1.Namespace]](),
 		workqueue.TypedRateLimitingQueueConfig[*eventData[*corev1.Namespace]]{Name: "nqosNamespaces"},
 	)
 	_, err = namespaceInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -187,7 +199,7 @@ func NewController(
 	c.nqosPodLister = podInformer.Lister()
 	c.nqosPodSynced = podInformer.Informer().HasSynced
 	c.nqosPodQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[*eventData[*corev1.Pod]](1*time.Second, 5*time.Second, 5),
+		controllerutil.DefaultRateLimiter[*eventData[*corev1.Pod]](),
 		workqueue.TypedRateLimitingQueueConfig[*eventData[*corev1.Pod]]{Name: "nqosPods"},
 	)
 	_, err = podInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -203,7 +215,7 @@ func NewController(
 	c.nqosNodeLister = nodeInformer.Lister()
 	c.nqosNodeSynced = nodeInformer.Informer().HasSynced
 	c.nqosNodeQueue = workqueue.NewTypedRateLimitingQueueWithConfig(
-		workqueue.NewTypedItemFastSlowRateLimiter[string](1*time.Second, 5*time.Second, 5),
+		controllerutil.DefaultRateLimiter[string](),
 		workqueue.TypedRateLimitingQueueConfig[string]{Name: "nqosNodes"},
 	)
 	_, err = nodeInformer.Informer().AddEventHandler(factory.WithUpdateHandlingForObjReplace(cache.ResourceEventHandlerFuncs{
@@ -485,8 +497,9 @@ func (c *Controller) onNQOSPodUpdate(oldObj, newObj interface{}) {
 	// zones. Rest of the cases we may return
 	oldPodLabels := labels.Set(oldPod.Labels)
 	newPodLabels := labels.Set(newPod.Labels)
-	oldPodIPs, _ := util.GetPodIPsOfNetwork(oldPod, c.NetInfo)
-	newPodIPs, _ := util.GetPodIPsOfNetwork(newPod, c.NetInfo)
+	resolver := c.podNetworkResolver()
+	oldPodIPs, _ := util.GetPodIPsOfNetwork(oldPod, c.NetInfo, resolver)
+	newPodIPs, _ := util.GetPodIPsOfNetwork(newPod, c.NetInfo, resolver)
 	oldPodCompleted := util.PodCompleted(oldPod)
 	newPodCompleted := util.PodCompleted(newPod)
 	if labels.Equals(oldPodLabels, newPodLabels) &&
@@ -498,6 +511,13 @@ func (c *Controller) onNQOSPodUpdate(oldObj, newObj interface{}) {
 	}
 	klog.V(5).Infof("Handling update event for pod %s/%s, labels %v, podIPs: %v, PodCompleted?: %v", newPod.Namespace, newPod.Name, newPodLabels, newPodIPs, newPodCompleted)
 	c.nqosPodQueue.Add(newEventData(oldPod, newPod))
+}
+
+func (c *Controller) podNetworkResolver() func(nadKey string) string {
+	if !c.NetInfo.IsUserDefinedNetwork() {
+		return nil
+	}
+	return c.networkManager.GetNetworkNameForNADKey
 }
 
 // onNQOSPodDelete queues the pod for processing.

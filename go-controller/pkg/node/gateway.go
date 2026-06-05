@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -12,17 +15,19 @@ import (
 	discovery "k8s.io/api/discovery/v1"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	egressipv1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/informer"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/egressip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/retry"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilerrors "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/errors"
+	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
+
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	egressipv1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/informer"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/egressip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/retry"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilerrors "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/errors"
 )
 
 // Gateway responds to Service and Endpoint K8s events
@@ -234,8 +239,19 @@ func (g *gateway) DeleteEndpointSlice(epSlice *discovery.EndpointSlice) error {
 	return utilerrors.Join(errors...)
 }
 
+// canHandleBridgeEgressIP returns true if this node should handle EgressIP
+// configuration on the bridge. Returns false if:
+// - Network segmentation (UDN) is not enabled
+// - Gateway mode is disabled
+// - Running in DPU-host mode (EgressIP is handled by ovnkube on the DPU where OVS runs)
+func canHandleBridgeEgressIP() bool {
+	return util.IsNetworkSegmentationSupportEnabled() &&
+		config.Gateway.Mode != config.GatewayModeDisabled &&
+		(config.IsModeDPU() || config.IsModeFull())
+}
+
 func (g *gateway) AddEgressIP(eip *egressipv1.EgressIP) error {
-	if !util.IsNetworkSegmentationSupportEnabled() || !config.OVNKubernetesFeature.EnableInterconnect || config.Gateway.Mode == config.GatewayModeDisabled {
+	if !canHandleBridgeEgressIP() {
 		return nil
 	}
 	isSyncRequired, err := g.bridgeEIPAddrManager.AddEgressIP(eip)
@@ -251,7 +267,7 @@ func (g *gateway) AddEgressIP(eip *egressipv1.EgressIP) error {
 }
 
 func (g *gateway) UpdateEgressIP(oldEIP, newEIP *egressipv1.EgressIP) error {
-	if !util.IsNetworkSegmentationSupportEnabled() || !config.OVNKubernetesFeature.EnableInterconnect || config.Gateway.Mode == config.GatewayModeDisabled {
+	if !canHandleBridgeEgressIP() {
 		return nil
 	}
 	isSyncRequired, err := g.bridgeEIPAddrManager.UpdateEgressIP(oldEIP, newEIP)
@@ -267,7 +283,7 @@ func (g *gateway) UpdateEgressIP(oldEIP, newEIP *egressipv1.EgressIP) error {
 }
 
 func (g *gateway) DeleteEgressIP(eip *egressipv1.EgressIP) error {
-	if !util.IsNetworkSegmentationSupportEnabled() || !config.OVNKubernetesFeature.EnableInterconnect || config.Gateway.Mode == config.GatewayModeDisabled {
+	if !canHandleBridgeEgressIP() {
 		return nil
 	}
 	isSyncRequired, err := g.bridgeEIPAddrManager.DeleteEgressIP(eip)
@@ -283,7 +299,7 @@ func (g *gateway) DeleteEgressIP(eip *egressipv1.EgressIP) error {
 }
 
 func (g *gateway) SyncEgressIP(eips []interface{}) error {
-	if !util.IsNetworkSegmentationSupportEnabled() || !config.OVNKubernetesFeature.EnableInterconnect || config.Gateway.Mode == config.GatewayModeDisabled {
+	if !canHandleBridgeEgressIP() {
 		return nil
 	}
 	if err := g.bridgeEIPAddrManager.SyncEgressIP(eips); err != nil {
@@ -357,16 +373,16 @@ func setupUDPAggregationUplink(ifname string) error {
 	return nil
 }
 
-func gatewayInitInternal(nodeName, gwIntf, egressGatewayIntf string, gwNextHops []net.IP, nodeSubnets, gwIPs []*net.IPNet,
+func gatewayInitInternal(ovsClient libovsdbclient.Client, nodeName, gwIntf, egressGatewayIntf string, gwNextHops []net.IP, nodeSubnets, gwIPs []*net.IPNet,
 	advertised bool, nodeAnnotator kube.Annotator) (
 	*bridgeconfig.BridgeConfiguration, *bridgeconfig.BridgeConfiguration, error) {
-	gatewayBridge, err := bridgeconfig.NewBridgeConfiguration(gwIntf, nodeName, types.PhysicalNetworkName, nodeSubnets, gwIPs, advertised)
+	gatewayBridge, err := bridgeconfig.NewBridgeConfiguration(ovsClient, gwIntf, nodeName, types.PhysicalNetworkName, nodeSubnets, gwIPs, advertised)
 	if err != nil {
 		return nil, nil, fmt.Errorf("bridge for interface failed for %s: %w", gwIntf, err)
 	}
 	var egressGWBridge *bridgeconfig.BridgeConfiguration
 	if egressGatewayIntf != "" {
-		egressGWBridge, err = bridgeconfig.NewBridgeConfiguration(egressGatewayIntf, nodeName, types.PhysicalNetworkExGwName, nodeSubnets, nil, false)
+		egressGWBridge, err = bridgeconfig.NewBridgeConfiguration(ovsClient, egressGatewayIntf, nodeName, types.PhysicalNetworkExGwName, nodeSubnets, nil, false)
 		if err != nil {
 			return nil, nil, fmt.Errorf("bridge for interface failed for %s: %w", egressGatewayIntf, err)
 		}
@@ -429,7 +445,7 @@ func gatewayInitInternal(nodeName, gwIntf, egressGatewayIntf string, gwNextHops 
 		}
 	}
 
-	if config.OvnKubeNode.Mode != types.NodeModeDPUHost {
+	if config.IsModeDPU() || config.IsModeFull() {
 		// Set static FDB entry for sharedGW MAC.
 		// If `GatewayIfaceRep` port is present, use it instead of LOCAL (bridge name).
 		gwport := gatewayBridge.GetBridgeName()                           // Default is LOCAL port for the bridge.
@@ -468,7 +484,7 @@ func (g *gateway) GetGatewayBridgeIface() string {
 }
 
 func (g *gateway) GetGatewayIface() string {
-	if config.OvnKubeNode.Mode != types.NodeModeDPUHost {
+	if config.IsModeDPU() || config.IsModeFull() {
 		if g.openflowManager == nil {
 			return ""
 		}
@@ -480,7 +496,7 @@ func (g *gateway) GetGatewayIface() string {
 
 // SetDefaultGatewayBridgeMAC updates the mac address for the OFM used to render flows with
 func (g *gateway) SetDefaultGatewayBridgeMAC(macAddr net.HardwareAddr) {
-	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
+	if config.IsModeDPUHost() {
 		return
 	}
 	g.openflowManager.setDefaultBridgeMAC(macAddr)
@@ -488,14 +504,14 @@ func (g *gateway) SetDefaultGatewayBridgeMAC(macAddr net.HardwareAddr) {
 }
 
 func (g *gateway) SetDefaultPodNetworkAdvertised(isPodNetworkAdvertised bool) {
-	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
+	if config.IsModeDPUHost() {
 		return
 	}
 	g.openflowManager.defaultBridge.GetNetworkConfig(types.DefaultNetworkName).Advertised.Store(isPodNetworkAdvertised)
 }
 
 func (g *gateway) GetDefaultPodNetworkAdvertised() bool {
-	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
+	if config.IsModeDPUHost() {
 		return false
 	}
 	return g.openflowManager.defaultBridge.GetNetworkConfig(types.DefaultNetworkName).Advertised.Load()
@@ -504,7 +520,7 @@ func (g *gateway) GetDefaultPodNetworkAdvertised() bool {
 // SetDefaultBridgeGARPDropFlows will enable flows to drop GARPs if the openflow
 // manager has been initialized.
 func (g *gateway) SetDefaultBridgeGARPDropFlows(isDropped bool) {
-	if config.OvnKubeNode.Mode == types.NodeModeDPUHost {
+	if config.IsModeDPUHost() {
 		return
 	}
 
@@ -517,18 +533,22 @@ func (g *gateway) SetDefaultBridgeGARPDropFlows(isDropped bool) {
 // Reconcile handles triggering updates to different components of a gateway, like OFM, Services
 func (g *gateway) Reconcile() error {
 	klog.Info("Reconciling gateway with updates")
-	if config.OvnKubeNode.Mode != types.NodeModeDPUHost {
+	if config.IsModeDPU() || config.IsModeFull() {
 		if g.openflowManager != nil {
-			if err := g.openflowManager.updateBridgeFlowCache(g.nodeIPManager.ListAddresses()); err != nil {
-				return err
+			if g.nodeIPManager == nil {
+				klog.V(5).Info("Skipping gateway OpenFlow reconcile because node IP manager is not initialized yet")
+			} else {
+				if err := g.openflowManager.updateBridgeFlowCache(g.nodeIPManager.ListAddresses()); err != nil {
+					return err
+				}
+				// let's sync these flows immediately
+				g.openflowManager.requestFlowSync()
 			}
-			// let's sync these flows immediately
-			g.openflowManager.requestFlowSync()
 		}
 	}
 	// TBD updateSNATRules() gets node host-cidr by accessing gateway.nodeIPManager, which does not
 	// exist in dpu-host mode.
-	if config.OvnKubeNode.Mode == types.NodeModeFull {
+	if config.IsModeFull() {
 		err := g.updateSNATRules()
 		if err != nil {
 			return err
@@ -565,11 +585,19 @@ func (g *gateway) addAllServices() []error {
 }
 
 func (g *gateway) updateSNATRules() error {
-	subnets := util.IPsToNetworkIPs(g.nodeIPManager.mgmtPort.GetAddresses()...)
-
 	if config.Gateway.Mode != config.GatewayModeLocal {
 		return delLocalGatewayPodSubnetNFTRules()
 	}
+
+	if g.nodeIPManager == nil {
+		klog.V(5).Info("Skipping SNAT rule update because node IP manager is not initialized yet")
+		return nil
+	}
+	if g.nodeIPManager.mgmtPort == nil {
+		klog.V(5).Info("Skipping SNAT rule update because management port is not initialized yet")
+		return nil
+	}
+	subnets := util.IPsToNetworkIPs(g.nodeIPManager.mgmtPort.GetAddresses()...)
 
 	return addOrUpdateLocalGatewayPodSubnetNFTRules(g.GetDefaultPodNetworkAdvertised(), subnets...)
 }

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package zoneinterconnect
 
 import (
@@ -12,11 +15,11 @@ import (
 
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
@@ -125,7 +128,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -159,7 +161,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -172,7 +173,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 			config.Default.EncapPort = 9880
 
 			var libovsdbOvnSBClient libovsdbclient.Client
@@ -201,7 +201,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -214,7 +213,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -254,7 +252,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -267,7 +264,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -303,7 +299,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -316,7 +311,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -357,7 +351,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -370,7 +363,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -419,7 +411,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -432,7 +423,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -467,7 +457,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
@@ -480,7 +469,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 
 			_, err := config.InitConfig(ctx, nil, nil)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			config.Kubernetes.HostNetworkNamespace = ""
 
 			var libovsdbOvnSBClient libovsdbclient.Client
 			_, libovsdbOvnSBClient, libovsdbCleanup, err = libovsdbtest.NewNBSBTestHarness(dbSetup)
@@ -535,7 +523,6 @@ var _ = ginkgo.Describe("Zone Interconnect Chassis Operations", func() {
 			"-cluster-subnets=" + clusterCIDR,
 			"-init-cluster-manager",
 			"-zone-join-switch-subnets=" + joinSubnetCIDR,
-			"-enable-interconnect",
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})

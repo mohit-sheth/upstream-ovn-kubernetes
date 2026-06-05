@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package pod
 
 import (
@@ -13,16 +16,16 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/id"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/allocator/mac"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/generator/udn"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/persistentips"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/id"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/ip/subnet"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/allocator/mac"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/generator/udn"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/persistentips"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // PodAnnotationAllocator is a utility to handle allocation of the PodAnnotation to Pods.
@@ -658,24 +661,21 @@ func AddRoutesGatewayIP(
 					nodeLRPMAC = util.IPAddrToHWAddr(gatewayIPnet.IP)
 				}
 			}
-			// Until https://github.com/ovn-kubernetes/ovn-kubernetes/issues/4876 is fixed, it is limited to IC only
-			if config.OVNKubernetesFeature.EnableInterconnect {
-				if _, isIPv6Mode := netinfo.IPMode(); isIPv6Mode {
-					var routerPortMac net.HardwareAddr
-					if !util.UDNLayer2NodeUsesTransitRouter(node) {
-						joinAddrs, err := udn.GetGWRouterIPs(node, netinfo.GetNetInfo())
-						if err != nil {
-							if util.IsAnnotationNotSetError(err) {
-								return types.NewSuppressedError(err)
-							}
-							return fmt.Errorf("failed parsing node gateway router join addresses, network %q, %w", netinfo.GetNetworkName(), err)
+			if _, isIPv6Mode := netinfo.IPMode(); isIPv6Mode {
+				var routerPortMac net.HardwareAddr
+				if !util.UDNLayer2NodeUsesTransitRouter(node) {
+					joinAddrs, err := udn.GetGWRouterIPs(node, netinfo.GetNetInfo())
+					if err != nil {
+						if util.IsAnnotationNotSetError(err) {
+							return types.NewSuppressedError(err)
 						}
-						routerPortMac = util.IPAddrToHWAddr(joinAddrs[0].IP)
-					} else {
-						routerPortMac = nodeLRPMAC
+						return fmt.Errorf("failed parsing node gateway router join addresses, network %q, %w", netinfo.GetNetworkName(), err)
 					}
-					podAnnotation.GatewayIPv6LLA = util.HWAddrToIPv6LLA(routerPortMac)
+					routerPortMac = util.IPAddrToHWAddr(joinAddrs[0].IP)
+				} else {
+					routerPortMac = nodeLRPMAC
 				}
+				podAnnotation.GatewayIPv6LLA = util.HWAddrToIPv6LLA(routerPortMac)
 			}
 			return nil
 		case types.Layer3Topology:

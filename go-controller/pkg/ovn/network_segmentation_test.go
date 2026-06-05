@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package ovn
 
 import (
@@ -9,12 +12,13 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 var _ = ginkgo.Describe("OVN Pod Operations with network segmentation", func() {
@@ -57,7 +61,7 @@ var _ = ginkgo.Describe("OVN Pod Operations with network segmentation", func() {
 	ginkgo.Context("on startup", func() {
 		ginkgo.It("reconciles an existing pod with missing 'role=primary' ovn annotation field", func() {
 			app.Action = func(*cli.Context) error {
-				namespaceT := *newNamespace("namespace1")
+				namespaceT := *testing.NewNamespace("namespace1")
 				// use 2 pods for different test options
 				t1 := newTPod(
 					"node1",
@@ -85,7 +89,7 @@ var _ = ginkgo.Describe("OVN Pod Operations with network segmentation", func() {
 							},
 							Options: map[string]string{
 								// check requested-chassis will be updated to correct t1.nodeName value
-								libovsdbops.RequestedChassis: t1.nodeName,
+								libovsdbops.RequestedChassis: requestedChassisForPod(t1),
 								// check old value for iface-id-ver will be updated to pod.UID
 								"iface-id-ver": "wrong_value",
 							},
@@ -98,7 +102,7 @@ var _ = ginkgo.Describe("OVN Pod Operations with network segmentation", func() {
 					},
 				}
 
-				pod1 := newPod(t1.namespace, t1.podName, t1.nodeName, t1.podIP)
+				pod1 := testing.NewPod(t1.namespace, t1.podName, t1.nodeName, t1.podIP)
 				setPodAnnotations(pod1, t1)
 				fakeOvn.startWithDBSetup(initialDB,
 					&corev1.NamespaceList{

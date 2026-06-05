@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package observability_lib
 
 import (
@@ -19,7 +22,7 @@ import (
 	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/observability-lib/sampledecoder"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/observability-lib/sampledecoder"
 )
 
 const (

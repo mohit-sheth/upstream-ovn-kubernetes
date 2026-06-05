@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package metrics
 
 import (
@@ -20,13 +23,13 @@ import (
 	libovsdbclient "github.com/ovn-kubernetes/libovsdb/client"
 	"github.com/ovn-kubernetes/libovsdb/model"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	libovsdbops "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
-	libovsdbutil "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/libovsdb/util"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/nbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/sbdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	libovsdbops "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/ops"
+	libovsdbutil "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/libovsdb/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/nbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/sbdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // metricNbE2eTimestamp is the UNIX timestamp value set to NB DB. Northd will eventually copy this
@@ -145,14 +148,6 @@ var MetricOVNKubeControllerSyncDuration = prometheus.NewGaugeVec(prometheus.Gaug
 	[]string{
 		"resource_name",
 	})
-
-// MetricOVNKubeControllerLeader identifies whether this instance of ovnkube-controller is a leader or not
-var MetricOVNKubeControllerLeader = prometheus.NewGauge(prometheus.GaugeOpts{
-	Namespace: types.MetricOvnkubeNamespace,
-	Subsystem: types.MetricOvnkubeSubsystemController,
-	Name:      "leader",
-	Help:      "Identifies whether the instance of ovnkube-controller is a leader(1) or not(0).",
-})
 
 var metricOvnKubeControllerLogFileSize = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: types.MetricOvnkubeNamespace,
@@ -346,7 +341,6 @@ const (
 // RegisterOVNKubeControllerBase registers ovnkube controller base metrics with the Prometheus registry.
 // This function should only be called once.
 func RegisterOVNKubeControllerBase() {
-	prometheus.MustRegister(MetricOVNKubeControllerLeader)
 	prometheus.MustRegister(MetricOVNKubeControllerReadyDuration)
 	prometheus.MustRegister(MetricOVNKubeControllerSyncDuration)
 	prometheus.MustRegister(prometheus.NewGaugeFunc(

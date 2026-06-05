@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package util
 
 import (
@@ -44,16 +47,17 @@ import (
 	utilnet "k8s.io/utils/net"
 	anpclientset "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminpolicybasedrouteclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
-	networkconnectclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
-	egressfirewallclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
-	egressipclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
-	egressqosclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
-	egressserviceclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
-	networkqosclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned"
-	routeadvertisementsclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned"
-	userdefinednetworkclientset "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminpolicybasedrouteclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned"
+	networkconnectclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/clusternetworkconnect/v1/apis/clientset/versioned"
+	egressfirewallclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/clientset/versioned"
+	egressipclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressip/v1/apis/clientset/versioned"
+	egressqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressqos/v1/apis/clientset/versioned"
+	egressserviceclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressservice/v1/apis/clientset/versioned"
+	networkqosclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1/apis/clientset/versioned"
+	routeadvertisementsclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/routeadvertisements/v1/apis/clientset/versioned"
+	userdefinednetworkclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/userdefinednetwork/v1/apis/clientset/versioned"
+	vtepclientset "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/vtep/v1/apis/clientset/versioned"
 )
 
 // OVNClientset is a wrapper around all clientsets used by OVN-Kubernetes
@@ -75,26 +79,7 @@ type OVNClientset struct {
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
 	FRRClient                 frrclientset.Interface
 	NetworkQoSClient          networkqosclientset.Interface
-}
-
-// OVNMasterClientset
-type OVNMasterClientset struct {
-	KubeClient                kubernetes.Interface
-	ANPClient                 anpclientset.Interface
-	EgressIPClient            egressipclientset.Interface
-	CloudNetworkClient        ocpcloudnetworkclientset.Interface
-	EgressFirewallClient      egressfirewallclientset.Interface
-	OCPNetworkClient          ocpnetworkclientset.Interface
-	EgressQoSClient           egressqosclientset.Interface
-	MultiNetworkPolicyClient  multinetworkpolicyclientset.Interface
-	EgressServiceClient       egressserviceclientset.Interface
-	AdminPolicyRouteClient    adminpolicybasedrouteclientset.Interface
-	IPAMClaimsClient          ipamclaimssclientset.Interface
-	NetworkAttchDefClient     networkattchmentdefclientset.Interface
-	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
-	RouteAdvertisementsClient routeadvertisementsclientset.Interface
-	FRRClient                 frrclientset.Interface
-	NetworkQoSClient          networkqosclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 // OVNKubeControllerClientset
@@ -113,6 +98,8 @@ type OVNKubeControllerClientset struct {
 	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
 	NetworkQoSClient          networkqosclientset.Interface
+	NetworkConnectClient      networkconnectclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 type OVNNodeClientset struct {
@@ -123,6 +110,7 @@ type OVNNodeClientset struct {
 	NetworkAttchDefClient     networkattchmentdefclientset.Interface
 	UserDefinedNetworkClient  userdefinednetworkclientset.Interface
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 type OVNClusterManagerClientset struct {
@@ -142,6 +130,7 @@ type OVNClusterManagerClientset struct {
 	RouteAdvertisementsClient routeadvertisementsclientset.Interface
 	FRRClient                 frrclientset.Interface
 	NetworkQoSClient          networkqosclientset.Interface
+	VTEPClient                vtepclientset.Interface
 }
 
 const (
@@ -153,46 +142,6 @@ const (
 var (
 	certUsages = []certificatesv1.KeyUsage{certificatesv1.UsageDigitalSignature, certificatesv1.UsageClientAuth}
 )
-
-func (cs *OVNClientset) GetMasterClientset() *OVNMasterClientset {
-	return &OVNMasterClientset{
-		KubeClient:                cs.KubeClient,
-		ANPClient:                 cs.ANPClient,
-		EgressIPClient:            cs.EgressIPClient,
-		CloudNetworkClient:        cs.CloudNetworkClient,
-		EgressFirewallClient:      cs.EgressFirewallClient,
-		OCPNetworkClient:          cs.OCPNetworkClient,
-		EgressQoSClient:           cs.EgressQoSClient,
-		MultiNetworkPolicyClient:  cs.MultiNetworkPolicyClient,
-		EgressServiceClient:       cs.EgressServiceClient,
-		AdminPolicyRouteClient:    cs.AdminPolicyRouteClient,
-		IPAMClaimsClient:          cs.IPAMClaimsClient,
-		NetworkAttchDefClient:     cs.NetworkAttchDefClient,
-		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
-		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
-		FRRClient:                 cs.FRRClient,
-		NetworkQoSClient:          cs.NetworkQoSClient,
-	}
-}
-
-func (cs *OVNMasterClientset) GetOVNKubeControllerClientset() *OVNKubeControllerClientset {
-	return &OVNKubeControllerClientset{
-		KubeClient:                cs.KubeClient,
-		ANPClient:                 cs.ANPClient,
-		EgressIPClient:            cs.EgressIPClient,
-		EgressFirewallClient:      cs.EgressFirewallClient,
-		OCPNetworkClient:          cs.OCPNetworkClient,
-		EgressQoSClient:           cs.EgressQoSClient,
-		MultiNetworkPolicyClient:  cs.MultiNetworkPolicyClient,
-		EgressServiceClient:       cs.EgressServiceClient,
-		AdminPolicyRouteClient:    cs.AdminPolicyRouteClient,
-		IPAMClaimsClient:          cs.IPAMClaimsClient,
-		NetworkAttchDefClient:     cs.NetworkAttchDefClient,
-		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
-		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
-		NetworkQoSClient:          cs.NetworkQoSClient,
-	}
-}
 
 func (cs *OVNClientset) GetOVNKubeControllerClientset() *OVNKubeControllerClientset {
 	return &OVNKubeControllerClientset{
@@ -210,6 +159,8 @@ func (cs *OVNClientset) GetOVNKubeControllerClientset() *OVNKubeControllerClient
 		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
 		NetworkQoSClient:          cs.NetworkQoSClient,
+		NetworkConnectClient:      cs.NetworkConnectClient,
+		VTEPClient:                cs.VTEPClient,
 	}
 }
 
@@ -231,6 +182,7 @@ func (cs *OVNClientset) GetClusterManagerClientset() *OVNClusterManagerClientset
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
 		FRRClient:                 cs.FRRClient,
 		NetworkQoSClient:          cs.NetworkQoSClient,
+		VTEPClient:                cs.VTEPClient,
 	}
 }
 
@@ -243,16 +195,7 @@ func (cs *OVNClientset) GetNodeClientset() *OVNNodeClientset {
 		NetworkAttchDefClient:     cs.NetworkAttchDefClient,
 		UserDefinedNetworkClient:  cs.UserDefinedNetworkClient,
 		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
-	}
-}
-
-func (cs *OVNMasterClientset) GetNodeClientset() *OVNNodeClientset {
-	return &OVNNodeClientset{
-		KubeClient:                cs.KubeClient,
-		EgressServiceClient:       cs.EgressServiceClient,
-		EgressIPClient:            cs.EgressIPClient,
-		NetworkAttchDefClient:     cs.NetworkAttchDefClient,
-		RouteAdvertisementsClient: cs.RouteAdvertisementsClient,
+		VTEPClient:                cs.VTEPClient,
 	}
 }
 
@@ -545,6 +488,11 @@ func NewOVNClientset(conf *config.KubernetesConfig) (*OVNClientset, error) {
 		return nil, err
 	}
 
+	vtepClientset, err := vtepclientset.NewForConfig(kconfig)
+	if err != nil {
+		return nil, err
+	}
+
 	return &OVNClientset{
 		KubeClient:                kclientset,
 		ANPClient:                 anpClientset,
@@ -563,6 +511,7 @@ func NewOVNClientset(conf *config.KubernetesConfig) (*OVNClientset, error) {
 		RouteAdvertisementsClient: routeAdvertisementsClientset,
 		FRRClient:                 frrClientset,
 		NetworkQoSClient:          networkqosClientset,
+		VTEPClient:                vtepClientset,
 	}, nil
 }
 
@@ -920,17 +869,6 @@ func ServiceNamespacedNameFromEndpointSlice(endpointSlice *discovery.EndpointSli
 				endpointSlice.Namespace, endpointSlice.Name, discovery.LabelServiceName)
 	}
 	return k8stypes.NamespacedName{Namespace: endpointSlice.Namespace, Name: svcName}, nil
-}
-
-// isHostEndpoint determines if the given endpoint ip belongs to a host networked pod
-func IsHostEndpoint(endpointIPstr string) bool {
-	endpointIP := net.ParseIP(endpointIPstr)
-	for _, clusterNet := range config.Default.ClusterSubnets {
-		if clusterNet.CIDR.Contains(endpointIP) {
-			return false
-		}
-	}
-	return true
 }
 
 func getEndpointsFromEndpointSlices(endpointSlices []*discovery.EndpointSlice) []discovery.Endpoint {

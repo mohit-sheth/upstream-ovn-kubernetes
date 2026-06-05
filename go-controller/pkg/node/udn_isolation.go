@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -11,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/moby/sys/userns"
@@ -25,15 +27,14 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 	kapi "k8s.io/kubernetes/pkg/apis/core"
 	"sigs.k8s.io/knftables"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
-	nodenft "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/nftables"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	nodenft "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/nftables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 const (
@@ -85,7 +86,6 @@ func NewUDNHostIsolationManager(ipv4, ipv6 bool, podInformer coreinformers.PodIn
 		udnOpenPortsICMPv6: newNFTPodElementsSet(nftablesUDNOpenPortsICMPv6, false),
 	}
 	controllerConfig := &controller.ControllerConfig[corev1.Pod]{
-		RateLimiter:    workqueue.NewTypedItemFastSlowRateLimiter[string](time.Second, 5*time.Second, 5),
 		Informer:       podInformer.Informer(),
 		Lister:         podInformer.Lister().List,
 		ObjNeedsUpdate: podNeedsUpdate,
@@ -357,7 +357,11 @@ func (m *UDNHostIsolationManager) runKubeletRestartTracker(ctx context.Context) 
 					klog.Errorf("Error closing dbus connection for UDN isolation: %v", err)
 				}
 				return
-			case signal := <-signalChan:
+			case signal, ok := <-signalChan:
+				if !ok || signal == nil {
+					// Channel was closed, connection is shutting down
+					return
+				}
 				klog.V(5).Infof("D-Bus event received: %#v", signal)
 				// Extract unit name from path
 				unitPath := signal.Path
@@ -461,7 +465,7 @@ func podNeedsUpdate(oldObj, newObj *corev1.Pod) bool {
 	}
 	// react to pod IP changes
 	return !reflect.DeepEqual(oldObj.Status, newObj.Status) ||
-		oldObj.Annotations[util.OvnPodAnnotationName] != newObj.Annotations[util.OvnPodAnnotationName] ||
+		oldObj.Annotations[types.OvnPodAnnotationName] != newObj.Annotations[types.OvnPodAnnotationName] ||
 		oldObj.Annotations[util.UDNOpenPortsAnnotationName] != newObj.Annotations[util.UDNOpenPortsAnnotationName]
 }
 

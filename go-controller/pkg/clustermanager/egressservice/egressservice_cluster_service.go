@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package egressservice
 
 import (
@@ -12,9 +15,9 @@ import (
 	"k8s.io/klog/v2"
 	utilnet "k8s.io/utils/net"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/ovn/controller/services"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 func (c *Controller) onServiceAdd(obj interface{}) {
@@ -138,7 +141,7 @@ func (c *Controller) backendNodesFor(svc *corev1.Service) ([]string, error) {
 				if !clusterNetworkedEpFound {
 					for _, ip := range ep.Addresses {
 						ipStr := utilnet.ParseIPSloppy(ip).String()
-						if !services.IsHostEndpoint(ipStr) {
+						if !services.IsHostEndpoint(ipStr, &util.DefaultNetInfo{}) {
 							clusterNetworkedEpFound = true
 							break
 						}

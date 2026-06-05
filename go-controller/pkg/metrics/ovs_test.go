@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package metrics
 
 import (
@@ -8,10 +11,10 @@ import (
 	"github.com/onsi/gomega"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cryptorand"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/metrics/mocks"
-	libovsdbtest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/vswitchd"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cryptorand"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/metrics/mocks"
+	libovsdbtest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/libovsdb"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/vswitchd"
 )
 
 type clientOutput struct {
@@ -51,6 +54,44 @@ var _ = ginkgo.Describe("OVS metrics", func() {
 	var resetsTotalMock, rxDroppedTotalMock, txDroppedTotalMock *mocks.GaugeMock
 	var rxErrorsTotalMock, txErrorsTotalMock, collisionsTotalMock, bridgeTotalMock *mocks.GaugeMock
 	var hwOffloadMock, tcPolicyMock *mocks.GaugeMock
+
+	// These tests overwrite package-level metrics (prometheus Gauges), so save and
+	// restore them per-spec to avoid leaking state into other tests.
+	var _metricOvsInterfaceResetsTotal prometheus.Gauge
+	var _metricOvsInterfaceRxDroppedTotal prometheus.Gauge
+	var _metricOvsInterfaceTxDroppedTotal prometheus.Gauge
+	var _metricOvsInterfaceRxErrorsTotal prometheus.Gauge
+	var _metricOvsInterfaceTxErrorsTotal prometheus.Gauge
+	var _metricOvsInterfaceCollisionsTotal prometheus.Gauge
+	var _metricOvsBridgeTotal prometheus.Gauge
+	var _metricOvsHwOffload prometheus.Gauge
+	var _metricOvsTcPolicy prometheus.Gauge
+
+	ginkgo.BeforeEach(func() {
+		// Save all original metrics
+		_metricOvsInterfaceResetsTotal = metricOvsInterfaceResetsTotal
+		_metricOvsInterfaceRxDroppedTotal = metricOvsInterfaceRxDroppedTotal
+		_metricOvsInterfaceTxDroppedTotal = metricOvsInterfaceTxDroppedTotal
+		_metricOvsInterfaceRxErrorsTotal = metricOvsInterfaceRxErrorsTotal
+		_metricOvsInterfaceTxErrorsTotal = metricOvsInterfaceTxErrorsTotal
+		_metricOvsInterfaceCollisionsTotal = metricOvsInterfaceCollisionsTotal
+		_metricOvsBridgeTotal = metricOvsBridgeTotal
+		_metricOvsHwOffload = metricOvsHwOffload
+		_metricOvsTcPolicy = metricOvsTcPolicy
+	})
+
+	ginkgo.AfterEach(func() {
+		// Restore all original metrics
+		metricOvsInterfaceResetsTotal = _metricOvsInterfaceResetsTotal
+		metricOvsInterfaceRxDroppedTotal = _metricOvsInterfaceRxDroppedTotal
+		metricOvsInterfaceTxDroppedTotal = _metricOvsInterfaceTxDroppedTotal
+		metricOvsInterfaceRxErrorsTotal = _metricOvsInterfaceRxErrorsTotal
+		metricOvsInterfaceTxErrorsTotal = _metricOvsInterfaceTxErrorsTotal
+		metricOvsInterfaceCollisionsTotal = _metricOvsInterfaceCollisionsTotal
+		metricOvsBridgeTotal = _metricOvsBridgeTotal
+		metricOvsHwOffload = _metricOvsHwOffload
+		metricOvsTcPolicy = _metricOvsTcPolicy
+	})
 
 	linkResets := 1
 	intf1 := vswitchd.Interface{Name: "porta", UUID: buildUUID()}

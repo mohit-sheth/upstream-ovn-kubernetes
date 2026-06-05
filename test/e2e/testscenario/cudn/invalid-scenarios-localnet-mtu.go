@@ -1,6 +1,9 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package cudn
 
-import "github.com/ovn-org/ovn-kubernetes/test/e2e/testscenario"
+import "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/testscenario"
 
 var LocalnetInvalidMTU = []testscenario.ValidateCRScenario{
 	{

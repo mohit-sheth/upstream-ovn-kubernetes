@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+# SPDX-License-Identifier: Apache-2.0
+
 """
 Kubernetes Workload Metrics Report Generator
 
@@ -18,9 +21,10 @@ import argparse
 class MetricsProcessor:
     """Process and analyze metrics data from JSON files."""
     
-    def __init__(self, metrics_dir: str = "."):
+    def __init__(self, metrics_dir: str = ".", workload: str = "kubelet-density-cni"):
+        self.workload = workload
         self.metrics_dir = metrics_dir
-        self.pod_latency_file = "podLatencyMeasurement-kubelet-density-cni.json"
+        self.pod_latency_file = f"podLatencyMeasurement-{self.workload}.json"
         self.container_cpu_file = "containerCPU.json"
         self.container_memory_file = "containerMemory.json"
         
@@ -139,11 +143,12 @@ class MetricsProcessor:
 class ReportGenerator:
     """Generate text report from processed metrics data."""
     
-    def __init__(self, title: str = "Kubernetes Workload Metrics Report"):
+    def __init__(self, title: str = "Kubernetes Workload Metrics Report", workload: str = "kubelet-density-cni"):
         self.title = title
+        self.workload = workload
     
     def generate_report(self, pod_latency: Dict[str, Any], ovn_cpu: Dict[str, Any], 
-                       ovn_memory: Dict[str, Any]) -> str:
+                       ovn_memory: Dict[str, Any] ) -> str:
         """Generate complete text report."""
         
         stats = pod_latency['stats']
@@ -151,7 +156,7 @@ class ReportGenerator:
         
         # Header
         report_lines.append("# 📊 Kubernetes Workload Metrics Report")
-        report_lines.append("## kubelet-density-cni Performance Results")
+        report_lines.append(f"## {self.workload} Performance Results")
         report_lines.append("")
         report_lines.append(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
         report_lines.append("")
@@ -251,6 +256,44 @@ class ReportGenerator:
             f.write(report_content)
         print(f"✓ Report saved to: {output_file}")
 
+    def save_json_data(self, pod_latency: dict[str, Any], ovn_cpu: dict[str, Any],
+                       ovn_memory: dict[str, Any], output_file: str) -> None:
+        """Save structured data as JSON for downstream processing."""
+        # Build CPU summary
+        cpu_summary = {}
+        for container_type, data in ovn_cpu.items():
+            if data:
+                cpu_values = [d['value'] for d in data]
+                cpu_summary[container_type] = {
+                    'avg': sum(cpu_values) / len(cpu_values),
+                    'max': max(cpu_values),
+                    'data_points': len(data)
+                }
+
+        # Build memory summary
+        memory_summary = {}
+        for container_type, data in ovn_memory.items():
+            if data:
+                memory_values = [d['value'] for d in data]
+                memory_summary[container_type] = {
+                    'avg': sum(memory_values) / len(memory_values),
+                    'max': max(memory_values),
+                    'data_points': len(data)
+                }
+
+        # Build structured output
+        output_data = {
+            'workload': self.workload,
+            'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC'),
+            'pod_latency': pod_latency['stats'] if pod_latency['stats'] else None,
+            'cpu': cpu_summary,
+            'memory': memory_summary
+        }
+
+        with open(output_file, 'w') as f:
+            json.dump(output_data, f, indent=2)
+        print(f"✓ JSON data saved to: {output_file}")
+
 
 def detect_pr_environment() -> Optional[str]:
     """Detect if running in a PR environment and return PR number."""
@@ -291,13 +334,17 @@ def detect_pr_environment() -> Optional[str]:
 def main():
     """Main function to generate the performance report."""
     parser = argparse.ArgumentParser(description='Generate Kubernetes workload metrics report')
+    parser.add_argument('--workload', default='kubelet-density-cni',
+                       help='Workload name (default: kubelet-density-cni)')
     parser.add_argument('--metrics-dir', default='.', 
                        help='Directory containing JSON metrics files (default: current directory)')
-    parser.add_argument('--output', default='performance_report.md', 
+    parser.add_argument('--output', default='performance_report.md',
                        help='Output file name (default: performance_report.md)')
+    parser.add_argument('--json-output',
+                       help='Output file for structured JSON data')
     parser.add_argument('--title', default='Kubernetes Workload Metrics Report',
                        help='Report title')
-    parser.add_argument('--pr-number', 
+    parser.add_argument('--pr-number',
                        help='PR number for GitHub comment (overrides auto-detection)')
     parser.add_argument('--github-comment', action='store_true',
                        help='Post report as GitHub comment if PR detected')
@@ -310,8 +357,8 @@ def main():
     print()
     
     # Initialize processor and generator
-    processor = MetricsProcessor(args.metrics_dir)
-    generator = ReportGenerator(args.title)
+    processor = MetricsProcessor(args.metrics_dir, args.workload)
+    generator = ReportGenerator(args.title, args.workload)
     
     # Load and process data
     print("📊 Loading and processing metrics data...")
@@ -351,7 +398,16 @@ def main():
     
     # Save report to file
     generator.save_report(report_content, args.output)
-    
+
+    # Save JSON data if requested
+    if args.json_output:
+        generator.save_json_data(
+            pod_latency_processed,
+            ovn_cpu_processed,
+            ovn_memory_processed,
+            args.json_output
+        )
+
     # Check for PR environment and post GitHub comment if requested
     pr_number = args.pr_number or detect_pr_environment()
     

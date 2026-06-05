@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package networkqos
 
 import (
@@ -13,7 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
-	nqosv1alpha1 "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
+	nqosv1alpha1 "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/networkqos/v1alpha1"
 )
 
 func (c *Controller) processNextNQOSPodWorkItem(wg *sync.WaitGroup) bool {
@@ -56,7 +59,7 @@ func (c *Controller) syncNetworkQoSPod(eventData *eventData[*corev1.Pod]) error 
 // - match source: add the ip to source address set, bind qos rule to the switch
 // - match dest: add the ip to the destination address set
 func (c *Controller) setPodForNQOS(pod *corev1.Pod, nqosState *networkQoSState, namespace *corev1.Namespace, addressSetMap map[string]sets.Set[string]) error {
-	addresses, err := getPodAddresses(pod, c.NetInfo)
+	addresses, err := getPodAddresses(pod, c.NetInfo, c.podNetworkResolver())
 	if err == nil && len(addresses) == 0 {
 		// pod either is not attached to this network, or hasn't been annotated with addresses yet, return without retry
 		klog.V(6).Infof("Pod %s/%s doesn't have addresses on network %s, skip NetworkQoS processing", pod.Namespace, pod.Name, c.GetNetworkName())

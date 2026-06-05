@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package node
 
 import (
@@ -22,19 +25,19 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	adminpolicybasedrouteclient "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/fake"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/kube/mocks"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/managementport"
-	nodenft "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/nftables"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/node/routemanager"
-	ovntest "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing"
-	netlink_mocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	util "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	utilMocks "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util/mocks"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	adminpolicybasedrouteclient "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/adminpolicybasedroute/v1/apis/clientset/versioned/fake"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/kube/mocks"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/bridgeconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/managementport"
+	nodenft "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/nftables"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/node/routemanager"
+	ovntest "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing"
+	netlink_mocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/testing/mocks/github.com/vishvananda/netlink"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	util "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	utilMocks "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util/mocks"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -311,7 +314,7 @@ var _ = Describe("Node", func() {
 						"external_ids:ovn-remote-probe-interval=%d "+
 						"external_ids:ovn-bridge-remote-probe-interval=%d "+
 						"other_config:bundle-idle-timeout=%d "+
-						"external_ids:ovn-is-interconn=false "+
+						"external_ids:ovn-is-interconn=true "+
 						"external_ids:ovn-monitor-all=true "+
 						"external_ids:ovn-ofctrl-wait-before-clear=0 "+
 						"external_ids:ovn-enable-lflow-cache=true "+
@@ -362,12 +365,12 @@ var _ = Describe("Node", func() {
 					Output: chassisUUID,
 				})
 				fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd: fmt.Sprintf("ovn-sbctl --timeout=15 --no-leader-only --data=bare --no-heading --columns=_uuid find "+
+					Cmd: fmt.Sprintf("ovn-sbctl --timeout=15 --data=bare --no-heading --columns=_uuid find "+
 						"Encap chassis_name=%s", chassisUUID),
 					Output: encapUUID,
 				})
 				fexec.AddFakeCmd(&ovntest.ExpectedCmd{
-					Cmd: fmt.Sprintf("ovn-sbctl --timeout=15 --no-leader-only set encap "+
+					Cmd: fmt.Sprintf("ovn-sbctl --timeout=15 set encap "+
 						"%s options:dst_port=%d", encapUUID, encapPort),
 				})
 
@@ -417,7 +420,7 @@ var _ = Describe("Node", func() {
 						"external_ids:ovn-remote-probe-interval=%d "+
 						"external_ids:ovn-bridge-remote-probe-interval=%d "+
 						"other_config:bundle-idle-timeout=%d "+
-						"external_ids:ovn-is-interconn=false "+
+						"external_ids:ovn-is-interconn=true "+
 						"external_ids:ovn-monitor-all=true "+
 						"external_ids:ovn-ofctrl-wait-before-clear=0 "+
 						"external_ids:ovn-enable-lflow-cache=false "+
@@ -487,7 +490,7 @@ var _ = Describe("Node", func() {
 						"external_ids:ovn-remote-probe-interval=%d "+
 						"external_ids:ovn-bridge-remote-probe-interval=%d "+
 						"other_config:bundle-idle-timeout=%d "+
-						"external_ids:ovn-is-interconn=false "+
+						"external_ids:ovn-is-interconn=true "+
 						"external_ids:ovn-monitor-all=true "+
 						"external_ids:ovn-ofctrl-wait-before-clear=0 "+
 						"external_ids:ovn-enable-lflow-cache=true "+
@@ -562,7 +565,7 @@ var _ = Describe("Node", func() {
 						"external_ids:ovn-remote-probe-interval=%d "+
 						"external_ids:ovn-bridge-remote-probe-interval=%d "+
 						"other_config:bundle-idle-timeout=%d "+
-						"external_ids:ovn-is-interconn=false "+
+						"external_ids:ovn-is-interconn=true "+
 						"external_ids:ovn-monitor-all=true "+
 						"external_ids:ovn-ofctrl-wait-before-clear=0 "+
 						"external_ids:ovn-enable-lflow-cache=true "+
@@ -637,7 +640,7 @@ var _ = Describe("Node", func() {
 						"external_ids:ovn-remote-probe-interval=%d "+
 						"external_ids:ovn-bridge-remote-probe-interval=%d "+
 						"other_config:bundle-idle-timeout=%d "+
-						"external_ids:ovn-is-interconn=false "+
+						"external_ids:ovn-is-interconn=true "+
 						"external_ids:ovn-monitor-all=true "+
 						"external_ids:ovn-ofctrl-wait-before-clear=0 "+
 						"external_ids:ovn-enable-lflow-cache=true "+
@@ -1769,7 +1772,6 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 			ip       string
 			port     uint16
 			protocol uint8
-			family   netlink.InetFamily
 		}
 
 		// Test data structure for table-driven tests
@@ -1782,12 +1784,21 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 			expectedFilters        []expectedConntrackFilter
 		}
 
-		// Helper to create EndpointSlice
-		makeEndpointSlice := func(portConfigs []struct {
+		type endpointPortConfig struct {
 			name     *string
 			port     int32
 			protocol corev1.Protocol
-		}, addresses []string) *discovery.EndpointSlice {
+		}
+
+		type servicePortConfig struct {
+			name       string
+			port       int32
+			targetPort int32
+			protocol   corev1.Protocol
+		}
+
+		// Helper to create EndpointSlice
+		makeEndpointSlice := func(portConfigs []endpointPortConfig, addresses []string) *discovery.EndpointSlice {
 			ports := make([]discovery.EndpointPort, len(portConfigs))
 			for i, pc := range portConfigs {
 				p := pc.port
@@ -1815,12 +1826,7 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 		}
 
 		// Helper to create Service
-		makeService := func(portConfigs []struct {
-			name       string
-			port       int32
-			targetPort int32
-			protocol   corev1.Protocol
-		}) *corev1.Service {
+		makeService := func(portConfigs []servicePortConfig) *corev1.Service {
 			ports := make([]corev1.ServicePort, len(portConfigs))
 			for i, pc := range portConfigs {
 				ports[i] = corev1.ServicePort{
@@ -1840,6 +1846,16 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 					Ports: ports,
 				},
 			}
+		}
+
+		// Helper to create NodePort or LoadBalancer Service by invoking makeService
+		makeServiceWithNodePort := func(portConfigs []servicePortConfig, nodePorts []int32, svcType corev1.ServiceType) *corev1.Service {
+			svc := makeService(portConfigs)
+			svc.Spec.Type = svcType
+			for i := 0; i < len(nodePorts) && i < len(svc.Spec.Ports); i++ {
+				svc.Spec.Ports[i].NodePort = nodePorts[i]
+			}
+			return svc
 		}
 
 		// Helper function to build expected ConntrackFilter for verification
@@ -1942,13 +1958,8 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 
 			Entry("old endpointslice is nil",
 				reconcileConntrackTestCase{
-					desc: "should not delete any conntrack entries when old endpoint is nil",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:                   "should not delete any conntrack entries when old endpoint is nil",
+					service:                makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice:       nil,
 					newEndpointSlice:       &discovery.EndpointSlice{},
 					expectedConntrackCalls: 0,
@@ -1957,69 +1968,42 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 
 			Entry("service exists with matching unnamed port",
 				reconcileConntrackTestCase{
-					desc: "should delete conntrack with service port for unnamed port",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:    "should delete conntrack with service port for unnamed port",
+					service: makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"10.0.0.1"},
 					),
 					newEndpointSlice:       nil,
 					expectedConntrackCalls: 1,
 					expectedFilters: []expectedConntrackFilter{
-						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
+						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
 					},
 				},
 			),
 
 			Entry("service exists with matching named port",
 				reconcileConntrackTestCase{
-					desc: "should delete conntrack with service port for named port",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "http", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:    "should delete conntrack with service port for named port",
+					service: makeService([]servicePortConfig{{name: "http", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: strPtr("http"), port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: strPtr("http"), port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"10.0.0.1"},
 					),
 					newEndpointSlice:       nil,
 					expectedConntrackCalls: 1,
 					expectedFilters: []expectedConntrackFilter{
-						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
+						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
 					},
 				},
 			),
 
 			Entry("service exists but port name mismatch",
 				reconcileConntrackTestCase{
-					desc: "should skip conntrack deletion when port name doesn't match",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "http", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:    "should skip conntrack deletion when port name doesn't match",
+					service: makeService([]servicePortConfig{{name: "http", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: strPtr("grpc"), port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: strPtr("grpc"), port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"10.0.0.1"},
 					),
 					newEndpointSlice:       nil,
@@ -2032,11 +2016,7 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 					desc:    "should return early without deleting conntrack when service not found",
 					service: nil,
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"10.0.0.1"},
 					),
 					newEndpointSlice:       nil,
@@ -2046,19 +2026,10 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 
 			Entry("TCP protocol should be skipped",
 				reconcileConntrackTestCase{
-					desc: "should skip conntrack deletion for TCP protocol",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: tcpProtocol}}),
+					desc:    "should skip conntrack deletion for TCP protocol",
+					service: makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: tcpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: nil, port: testEndpointPort1, protocol: tcpProtocol}},
+						[]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: tcpProtocol}},
 						[]string{"10.0.0.1"},
 					),
 					newEndpointSlice:       nil,
@@ -2068,78 +2039,51 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 
 			Entry("multiple endpoints",
 				reconcileConntrackTestCase{
-					desc: "should delete conntrack for each endpoint",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:    "should delete conntrack for each endpoint",
+					service: makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"10.0.0.1", "10.0.0.2", "10.0.0.3"},
 					),
 					newEndpointSlice:       nil,
 					expectedConntrackCalls: 3,
 					expectedFilters: []expectedConntrackFilter{
-						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
-						{ip: "10.0.0.2", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
-						{ip: "10.0.0.3", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
+						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+						{ip: "10.0.0.2", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+						{ip: "10.0.0.3", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
 					},
 				},
 			),
 
 			Entry("IPv6 endpoint",
 				reconcileConntrackTestCase{
-					desc: "should delete conntrack for IPv6 endpoint",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:    "should delete conntrack for IPv6 endpoint",
+					service: makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"fd00::1"},
 					),
 					newEndpointSlice:       nil,
 					expectedConntrackCalls: 1,
 					expectedFilters: []expectedConntrackFilter{
-						{ip: "fd00::1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V6},
+						{ip: "fd00::1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
 					},
 				},
 			),
 
 			Entry("dual-stack endpoints",
 				reconcileConntrackTestCase{
-					desc: "should delete conntrack for both IPv4 and IPv6",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
+					desc:    "should delete conntrack for both IPv4 and IPv6",
+					service: makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
+						[]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}},
 						[]string{"10.0.0.1", "fd00::1"},
 					),
 					newEndpointSlice:       nil,
 					expectedConntrackCalls: 2,
 					expectedFilters: []expectedConntrackFilter{
-						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
-						{ip: "fd00::1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V6},
+						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+						{ip: "fd00::1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
 					},
 				},
 			),
@@ -2147,21 +2091,12 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 			Entry("multiple service ports with matching names",
 				reconcileConntrackTestCase{
 					desc: "should match correct service port by name for multiple ports",
-					service: makeService([]struct {
-						name       string
-						port       int32
-						targetPort int32
-						protocol   corev1.Protocol
-					}{
+					service: makeService([]servicePortConfig{
 						{name: "http", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol},
 						{name: "https", port: testServicePort2, targetPort: testEndpointPort2, protocol: udpProtocol},
 					}),
 					oldEndpointSlice: makeEndpointSlice(
-						[]struct {
-							name     *string
-							port     int32
-							protocol corev1.Protocol
-						}{
+						[]endpointPortConfig{
 							{name: strPtr("http"), port: testEndpointPort1, protocol: udpProtocol},
 							{name: strPtr("https"), port: testEndpointPort2, protocol: udpProtocol},
 						},
@@ -2170,12 +2105,126 @@ add element inet ovn-kubernetes remote-node-ips-v6 { 2002:db8:1::4 }
 					newEndpointSlice:       nil,
 					expectedConntrackCalls: 2,
 					expectedFilters: []expectedConntrackFilter{
-						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
-						{ip: "10.0.0.1", port: uint16(testServicePort2), protocol: syscall.IPPROTO_UDP, family: netlink.FAMILY_V4},
+						{ip: "10.0.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+						{ip: "10.0.0.1", port: uint16(testServicePort2), protocol: syscall.IPPROTO_UDP},
 					},
 				},
 			),
+			Entry("NodePort service", reconcileConntrackTestCase{
+				desc: "should delete conntrack entries for both service port and NodePort",
+				service: makeServiceWithNodePort([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}},
+					[]int32{30000}, corev1.ServiceTypeNodePort),
+				oldEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.1"}),
+				newEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.2"}),
+				expectedConntrackCalls: 2,
+				expectedFilters: []expectedConntrackFilter{
+					{ip: "10.128.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+					{ip: "10.128.0.1", port: 30000, protocol: syscall.IPPROTO_UDP},
+				},
+			}),
+			Entry("NodePort service with mixed protocols should only clean UDP NodePort", reconcileConntrackTestCase{
+				desc: "should only delete conntrack for UDP NodePort, not TCP (protocol filtering)",
+				service: makeServiceWithNodePort([]servicePortConfig{
+					{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol},
+					{name: "", port: testServicePort2, targetPort: testEndpointPort1, protocol: tcpProtocol},
+				}, []int32{30000, 30001}, corev1.ServiceTypeNodePort),
+				oldEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.1"}),
+				newEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.2"}),
+				expectedConntrackCalls: 2, // Only UDP: service port + NodePort (TCP port 30001 should be skipped)
+				expectedFilters: []expectedConntrackFilter{
+					{ip: "10.128.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+					{ip: "10.128.0.1", port: 30000, protocol: syscall.IPPROTO_UDP},
+				},
+			}),
+			Entry("NodePort service with multiple UDP ports", reconcileConntrackTestCase{
+				desc: "should delete conntrack entries only for the specific NodePort that changed",
+				service: makeServiceWithNodePort([]servicePortConfig{
+					{name: "dns", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol},
+					{name: "snmp", port: testServicePort2, targetPort: testEndpointPort1, protocol: udpProtocol},
+				}, []int32{30000, 30002}, corev1.ServiceTypeNodePort),
+				oldEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: strPtr("dns"), port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.1"}),
+				newEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: strPtr("dns"), port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.2"}),
+				expectedConntrackCalls: 2, // service port + NodePort for "dns" only
+				expectedFilters: []expectedConntrackFilter{
+					{ip: "10.128.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+					{ip: "10.128.0.1", port: 30000, protocol: syscall.IPPROTO_UDP},
+				},
+			}),
+			Entry("LoadBalancer service with NodePort allocation", reconcileConntrackTestCase{
+				desc: "should delete conntrack entries for both service port and NodePort",
+				service: func() *corev1.Service {
+					svc := makeServiceWithNodePort([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}},
+						[]int32{30000}, corev1.ServiceTypeLoadBalancer)
+					svc.Status = corev1.ServiceStatus{
+						LoadBalancer: corev1.LoadBalancerStatus{
+							Ingress: []corev1.LoadBalancerIngress{{IP: "5.5.5.5"}},
+						},
+					}
+					return svc
+				}(),
+				oldEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.1"}),
+				newEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.2"}),
+				expectedConntrackCalls: 2,
+				expectedFilters: []expectedConntrackFilter{
+					{ip: "10.128.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+					{ip: "10.128.0.1", port: 30000, protocol: syscall.IPPROTO_UDP},
+				},
+			}),
+			Entry("LoadBalancer service with AllocateLoadBalancerNodePorts=false", func() reconcileConntrackTestCase {
+				allocateNodePorts := false
+				return reconcileConntrackTestCase{
+					desc: "should only delete conntrack entries for service port (no NodePort)",
+					service: func() *corev1.Service {
+						svc := makeService([]servicePortConfig{{name: "", port: testServicePort1, targetPort: testEndpointPort1, protocol: udpProtocol}})
+						svc.Spec.Type = corev1.ServiceTypeLoadBalancer
+						svc.Spec.AllocateLoadBalancerNodePorts = &allocateNodePorts
+						svc.Status = corev1.ServiceStatus{
+							LoadBalancer: corev1.LoadBalancerStatus{
+								Ingress: []corev1.LoadBalancerIngress{{IP: "5.5.5.5"}},
+							},
+						}
+						return svc
+					}(),
+					oldEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.1"}),
+					newEndpointSlice:       makeEndpointSlice([]endpointPortConfig{{name: nil, port: testEndpointPort1, protocol: udpProtocol}}, []string{"10.128.0.2"}),
+					expectedConntrackCalls: 1,
+					expectedFilters: []expectedConntrackFilter{
+						{ip: "10.128.0.1", port: uint16(testServicePort1), protocol: syscall.IPPROTO_UDP},
+					},
+				}
+			}()),
 		)
+	})
+
+	Describe("advertised UDN isolation nftables", func() {
+		const nodeName = "my-node"
+
+		BeforeEach(func() {
+			Expect(config.PrepareTestConfig()).To(Succeed())
+		})
+
+		It("sets up isolation sets for DPU host mode without NodePort", func() {
+			config.OvnKubeNode.Mode = types.NodeModeDPUHost
+			config.OVNKubernetesFeature.EnableMultiNetwork = true
+			config.OVNKubernetesFeature.EnableRouteAdvertisements = true
+			config.Gateway.NodeportEnable = false
+
+			nft := nodenft.SetFakeNFTablesHelper()
+			ovnClient := util.GetOVNClientset()
+			wf, err := factory.NewNodeWatchFactory(ovnClient.GetNodeClientset(), nodeName)
+			Expect(err).NotTo(HaveOccurred())
+			defer wf.Shutdown()
+
+			routeManager := routemanager.NewController()
+			cnnci := NewCommonNodeNetworkControllerInfo(ovnClient.KubeClient, ovnClient.AdminPolicyRouteClient, wf, nil, nodeName, routeManager)
+			_, err = NewDefaultNodeNetworkController(cnnci, nil, nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = nft.ListElements(context.TODO(), "set", nftablesAdvertisedUDNsSetV4)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = nft.ListElements(context.TODO(), "set", nftablesAdvertisedUDNsSetV6)
+			Expect(err).NotTo(HaveOccurred())
+		})
 	})
 })
 

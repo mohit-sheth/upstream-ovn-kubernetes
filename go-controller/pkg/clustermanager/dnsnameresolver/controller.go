@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package dnsnameresolver
 
 import (
@@ -5,7 +8,6 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
-	"time"
 
 	ocpnetworkapiv1alpha1 "github.com/openshift/api/network/v1alpha1"
 	ocpnetworkclientset "github.com/openshift/client-go/network/clientset/versioned"
@@ -15,15 +17,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/controller"
-	egressfirewall "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
-	egressfirewalllister "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/listers/egressfirewall/v1"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/config"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controller"
+	egressfirewall "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1"
+	egressfirewalllister "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/crd/egressfirewall/v1/apis/listers/egressfirewall/v1"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // Controller holds the information of the DNS names and the corresponding
@@ -62,7 +63,6 @@ func (c *Controller) initControllers(watchFactory *factory.WatchFactory) {
 	efSharedIndexInformer := watchFactory.EgressFirewallInformer().Informer()
 	c.efLister = watchFactory.EgressFirewallInformer().Lister()
 	efConfig := &controller.ControllerConfig[egressfirewall.EgressFirewall]{
-		RateLimiter:    workqueue.NewTypedItemFastSlowRateLimiter[string](time.Second, 5*time.Second, 5),
 		Informer:       efSharedIndexInformer,
 		Lister:         c.efLister.List,
 		ObjNeedsUpdate: efNeedsUpdate,
@@ -74,7 +74,6 @@ func (c *Controller) initControllers(watchFactory *factory.WatchFactory) {
 	dnsSharedIndexInformer := watchFactory.DNSNameResolverInformer().Informer()
 	c.dnsLister = ocpnetworklisterv1alpha1.NewDNSNameResolverLister(dnsSharedIndexInformer.GetIndexer())
 	dnsConfig := &controller.ControllerConfig[ocpnetworkapiv1alpha1.DNSNameResolver]{
-		RateLimiter:    workqueue.NewTypedItemFastSlowRateLimiter[string](time.Second, 5*time.Second, 5),
 		Informer:       dnsSharedIndexInformer,
 		Lister:         c.dnsLister.List,
 		ObjNeedsUpdate: dnsNeedsUpdate,

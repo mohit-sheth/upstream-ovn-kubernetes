@@ -1,17 +1,21 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package clustermanager
 
 import (
-	"github.com/containernetworking/cni/pkg/types"
+	cnitypes "github.com/containernetworking/cni/pkg/types"
 
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 
-	ovncnitypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/cni/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/config"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/factory"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/networkmanager"
-	ovntypes "github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/clustermanager/node"
+	ovncnitypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/cni/types"
+	nodecontroller "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/controllers/node"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/factory"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/networkmanager"
+	ovntypes "github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
 )
 
 // userDefinedNetworkClusterManager object manages the multi net-attach-def controllers.
@@ -26,7 +30,8 @@ type userDefinedNetworkClusterManager struct {
 	// event recorder used to post events to k8s
 	recorder record.EventRecorder
 
-	errorReporter NetworkStatusReporter
+	errorReporter  NetworkStatusReporter
+	nodeReconciler *nodecontroller.NodeController
 }
 
 func newUserDefinedNetworkClusterManager(
@@ -34,6 +39,7 @@ func newUserDefinedNetworkClusterManager(
 	wf *factory.WatchFactory,
 	networkManager networkmanager.Interface,
 	recorder record.EventRecorder,
+	nodeReconciler *nodecontroller.NodeController,
 ) (*userDefinedNetworkClusterManager, error) {
 	klog.Infof("Creating user-defined network cluster manager")
 	sncm := &userDefinedNetworkClusterManager{
@@ -41,6 +47,7 @@ func newUserDefinedNetworkClusterManager(
 		watchFactory:   wf,
 		networkManager: networkManager,
 		recorder:       recorder,
+		nodeReconciler: nodeReconciler,
 	}
 	return sncm, nil
 }
@@ -69,6 +76,7 @@ func (sncm *userDefinedNetworkClusterManager) NewNetworkController(nInfo util.Ne
 		sncm.recorder,
 		sncm.networkManager,
 		sncm.errorReporter,
+		sncm.nodeReconciler,
 	)
 	return sncc, nil
 }
@@ -79,20 +87,20 @@ func (sncm *userDefinedNetworkClusterManager) isTopologyManaged(nInfo util.NetIn
 		// we need to allocate subnets to each node regardless of configuration
 		return true
 	case ovntypes.Layer2Topology:
-		// for IC, pod IPs and tunnel IDs need to be allocated
-		// in non IC config, this is done from ovnkube-master network controller
-		return config.OVNKubernetesFeature.EnableInterconnect
+		// pod IPs and tunnel IDs are allocated by cluster-manager
+		return true
 	case ovntypes.LocalnetTopology:
-		// for IC, pod IPs need to be allocated
-		// in non IC config, this is done from ovnkube-master network controller
-		return config.OVNKubernetesFeature.EnableInterconnect && len(nInfo.Subnets()) > 0
+		// pod IPs are allocated by cluster-manager if there is IPAM
+		return len(nInfo.Subnets()) > 0
 	}
 	return false
 }
 
-// CleanupStaleNetworks cleans of stale data from the OVN database
-// corresponding to networks not included in validNetworks, which are considered
-// stale.
+// CleanupStaleNetworks cleans up stale node annotations (node-subnets, network-ids,
+// tunnel IDs) for networks not included in validNetworks.
+// Stale network names are discovered from per-network annotation sources:
+//   - k8s.ovn.org/node-subnets (covers L3 UDNs)
+//   - k8s.ovn.org/udn-layer2-node-gateway-router-lrp-tunnel-ids (covers L2 primary UDNs with IC)
 func (sncm *userDefinedNetworkClusterManager) CleanupStaleNetworks(validNetworks ...util.NetInfo) error {
 	existingNetworksMap := map[string]struct{}{}
 	for _, network := range validNetworks {
@@ -106,30 +114,47 @@ func (sncm *userDefinedNetworkClusterManager) CleanupStaleNetworks(validNetworks
 	}
 
 	for _, node := range existingNodes {
+		// node-subnets covers L3 UDNs
 		nodeNetworks, err := util.GetNodeSubnetAnnotationNetworkNames(node)
 		if err != nil {
-			continue
+			nodeNetworks = nil
 		}
-
-		for i := range nodeNetworks {
-			netName := nodeNetworks[i]
+		for _, netName := range nodeNetworks {
 			if netName == ovntypes.DefaultNetworkName {
 				continue
 			}
-
 			if _, ok := existingNetworksMap[netName]; ok {
-				// network still exists, no cleanup to do
 				continue
 			}
-
 			if _, ok := staleNetworkControllers[netName]; ok {
-				// dummy controller already created for the stale network
 				continue
 			}
-
-			oc, err := sncm.newDummyLayer3NetworkController(netName)
+			oc, err := sncm.newDummyNetworkController(ovntypes.Layer3Topology, netName)
 			if err != nil {
-				klog.Errorf("Failed to delete stale subnet annotation for network %s: %v", netName, err)
+				klog.Errorf("Failed to create dummy controller for stale network %s: %v", netName, err)
+				continue
+			}
+			staleNetworkControllers[netName] = oc
+		}
+
+		// tunnel IDs cover L2 primary UDNs with IC
+		tunnelNetworks, err := util.GetNodeUDNLayer2TunnelIDAnnotationNetworkNames(node)
+		if err != nil {
+			tunnelNetworks = nil
+		}
+		for _, netName := range tunnelNetworks {
+			if netName == ovntypes.DefaultNetworkName {
+				continue
+			}
+			if _, ok := existingNetworksMap[netName]; ok {
+				continue
+			}
+			if _, ok := staleNetworkControllers[netName]; ok {
+				continue
+			}
+			oc, err := sncm.newDummyNetworkController(ovntypes.Layer2Topology, netName)
+			if err != nil {
+				klog.Errorf("Failed to create dummy controller for stale network %s: %v", netName, err)
 				continue
 			}
 			staleNetworkControllers[netName] = oc
@@ -137,18 +162,20 @@ func (sncm *userDefinedNetworkClusterManager) CleanupStaleNetworks(validNetworks
 	}
 
 	for netName, oc := range staleNetworkControllers {
-		klog.Infof("Cleanup subnet annotation for stale network %s", netName)
+		klog.Infof("Cleanup stale network %s", netName)
 		err = oc.Cleanup()
 		if err != nil {
-			klog.Errorf("Failed to delete stale subnet annotation for network %s: %v", netName, err)
+			klog.Errorf("Failed to clean up stale network %s: %v", netName, err)
 		}
 	}
 	return nil
 }
 
-// newDummyNetworkController creates a dummy network controller used to clean up specific network
-func (sncm *userDefinedNetworkClusterManager) newDummyLayer3NetworkController(netName string) (networkmanager.NetworkController, error) {
-	netInfo, _ := util.NewNetInfo(&ovncnitypes.NetConf{NetConf: types.NetConf{Name: netName}, Topology: ovntypes.Layer3Topology})
+// newDummyNetworkController creates a minimal network controller used only to
+// clean up stale node annotations for the given network. It skips the full
+// init() path and only sets up what Cleanup() requires: a nodeAllocator.
+func (sncm *userDefinedNetworkClusterManager) newDummyNetworkController(topoType, netName string) (networkmanager.NetworkController, error) {
+	netInfo, _ := util.NewNetInfo(&ovncnitypes.NetConf{NetConf: cnitypes.NetConf{Name: netName}, Topology: topoType})
 	nc := newNetworkClusterController(
 		netInfo,
 		sncm.ovnClient,
@@ -156,7 +183,10 @@ func (sncm *userDefinedNetworkClusterManager) newDummyLayer3NetworkController(ne
 		sncm.recorder,
 		sncm.networkManager,
 		nil,
+		sncm.nodeReconciler,
 	)
-	err := nc.init()
-	return nc, err
+	if nc.hasNodeAllocation() {
+		nc.nodeAllocator = node.NewNodeAllocator(ovntypes.InvalidID, nc.GetNetInfo(), nc.watchFactory.NodeCoreInformer().Lister(), nc.kube, nil)
+	}
+	return nc, nil
 }

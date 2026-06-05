@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright The OVN-Kubernetes Contributors
+// SPDX-License-Identifier: Apache-2.0
+
 package e2e
 
 import (
@@ -17,14 +20,14 @@ import (
 	"github.com/onsi/ginkgo/v2/dsl/table"
 	"github.com/onsi/gomega"
 
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/types"
-	"github.com/ovn-org/ovn-kubernetes/go-controller/pkg/util"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/deploymentconfig"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/feature"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/images"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider"
-	infraapi "github.com/ovn-org/ovn-kubernetes/test/e2e/infraprovider/api"
-	"github.com/ovn-org/ovn-kubernetes/test/e2e/ipalloc"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/types"
+	"github.com/ovn-kubernetes/ovn-kubernetes/go-controller/pkg/util"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/deploymentconfig"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/feature"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/images"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider"
+	infraapi "github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/infraprovider/api"
+	"github.com/ovn-kubernetes/ovn-kubernetes/test/e2e/ipalloc"
 
 	nadclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/typed/k8s.cni.cncf.io/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -106,18 +109,13 @@ func (h *egressNodeAvailabilityHandlerViaHealthCheck) checkMode(restore bool) (s
 		return "", "", false
 	}
 	ovnKubeNamespace := deploymentconfig.Get().OVNKubernetesNamespace()
-	framework.Logf("Checking the ovnkube-node and ovnkube-master (ovnkube-cluster-manager if interconnect=true) healthcheck ports in use")
+	framework.Logf("Checking the ovnkube-node and ovnkube-cluster-manager healthcheck ports in use")
 	portNode := getTemplateContainerEnv(ovnKubeNamespace, "daemonset/ovnkube-node", getNodeContainerName(), OVN_EGRESSIP_HEALTHCHECK_PORT_ENV_NAME)
-	var portMaster string
-	if isInterconnectEnabled() {
-		portMaster = getTemplateContainerEnv(ovnKubeNamespace, "deployment/ovnkube-control-plane", "ovnkube-cluster-manager", OVN_EGRESSIP_HEALTHCHECK_PORT_ENV_NAME)
-	} else {
-		portMaster = getTemplateContainerEnv(ovnKubeNamespace, "deployment/ovnkube-master", "ovnkube-master", OVN_EGRESSIP_HEALTHCHECK_PORT_ENV_NAME)
-	}
+	portControlPlane := getTemplateContainerEnv(ovnKubeNamespace, "deployment/ovnkube-control-plane", "ovnkube-cluster-manager", OVN_EGRESSIP_HEALTHCHECK_PORT_ENV_NAME)
 
 	wantLegacy := (h.Legacy && !restore) || (h.modeWasLegacy && restore)
 	isLegacy := portNode == "" || portNode == OVN_EGRESSIP_LEGACY_HEALTHCHECK_PORT_ENV
-	outOfSync := portNode != portMaster
+	outOfSync := portNode != portControlPlane
 
 	if !h.modeWasChecked {
 		h.modeWasChecked = true
@@ -127,12 +125,12 @@ func (h *egressNodeAvailabilityHandlerViaHealthCheck) checkMode(restore bool) (s
 
 	if wantLegacy {
 		// we want to change to legacy health check if we are not already in
-		// that mode or if node and master are out of sync
+		// that mode or if node and control plane are out of sync
 		return OVN_EGRESSIP_LEGACY_HEALTHCHECK_PORT_ENV, OVN_EGRESSIP_LEGACY_HEALTHCHECK_PORT, !isLegacy || outOfSync
 	}
 	if !wantLegacy && !isLegacy {
 		// we are is GRPC health check mode as we want but reset if node and
-		// master are out of sync
+		// control plane are out of sync
 		return portNode, portNode, outOfSync
 	}
 	// we are in legacy health check mode and we want to change to GRPC mode.
@@ -158,11 +156,7 @@ func (h *egressNodeAvailabilityHandlerViaHealthCheck) setMode(nodeName string, r
 		ovnKubeNamespace := deploymentconfig.Get().OVNKubernetesNamespace()
 		setEnv := map[string]string{OVN_EGRESSIP_HEALTHCHECK_PORT_ENV_NAME: portEnv}
 		setUnsetTemplateContainerEnv(h.F.ClientSet, ovnKubeNamespace, "daemonset/ovnkube-node", getNodeContainerName(), setEnv)
-		if isInterconnectEnabled() {
-			setUnsetTemplateContainerEnv(h.F.ClientSet, ovnKubeNamespace, "deployment/ovnkube-control-plane", "ovnkube-cluster-manager", setEnv)
-		} else {
-			setUnsetTemplateContainerEnv(h.F.ClientSet, ovnKubeNamespace, "deployment/ovnkube-master", "ovnkube-master", setEnv)
-		}
+		setUnsetTemplateContainerEnv(h.F.ClientSet, ovnKubeNamespace, "deployment/ovnkube-control-plane", "ovnkube-cluster-manager", setEnv)
 	}
 	if port != "" {
 		op := "Allow"
@@ -637,19 +631,16 @@ var _ = ginkgo.DescribeTableSubtree("e2e egress IP validation", feature.EgressIP
 		if !isNetworkSegmentationEnabled() {
 			return false, "network segmentation is disabled. Environment variable 'ENABLE_NETWORK_SEGMENTATION' must have value true"
 		}
-		if !isInterconnectEnabled() {
-			return false, "interconnect is disabled. Environment variable 'OVN_ENABLE_INTERCONNECT' must have value true"
-		}
 		if netConfigParams.topology == types.LocalnetTopology {
 			return false, "unsupported network topology"
 		}
 		if netConfigParams.cidr == "" {
 			return false, "UDN network must have subnet specified"
 		}
-		if utilnet.IsIPv4CIDRString(netConfigParams.cidr) && !isNodeInternalAddressesPresentForIPFamily(nodes, corev1.IPv4Protocol) {
+		if cidrsContainIPFamily(netConfigParams.cidr, false) && !isNodeInternalAddressesPresentForIPFamily(nodes, corev1.IPv4Protocol) {
 			return false, "cluster must have IPv4 Node internal address"
 		}
-		if utilnet.IsIPv6CIDRString(netConfigParams.cidr) && !isNodeInternalAddressesPresentForIPFamily(nodes, corev1.IPv6Protocol) {
+		if cidrsContainIPFamily(netConfigParams.cidr, true) && !isNodeInternalAddressesPresentForIPFamily(nodes, corev1.IPv6Protocol) {
 			return false, "cluster must have IPv6 Node internal address"
 		}
 		return true, "network is supported"
@@ -675,11 +666,11 @@ var _ = ginkgo.DescribeTableSubtree("e2e egress IP validation", feature.EgressIP
 			if netConfigParams.cidr == "" {
 				framework.Failf("network config must have subnet defined")
 			}
-			if utilnet.IsIPv4CIDRString(netConfigParams.cidr) && isIPv4Cluster {
-				ipFamily = corev1.IPv4Protocol
-			}
-			if utilnet.IsIPv6CIDRString(netConfigParams.cidr) && isIPv6Cluster {
+			if cidrsContainIPFamily(netConfigParams.cidr, true) && isIPv6Cluster {
 				ipFamily = corev1.IPv6Protocol
+			}
+			if cidrsContainIPFamily(netConfigParams.cidr, false) && isIPv4Cluster {
+				ipFamily = corev1.IPv4Protocol
 			}
 		}
 		if ipFamily == corev1.IPFamilyUnknown {
@@ -806,14 +797,6 @@ var _ = ginkgo.DescribeTableSubtree("e2e egress IP validation", feature.EgressIP
 		// configure and add additional network to worker containers for EIP multi NIC feature
 		secondaryProviderNetwork, err := providerCtx.CreateNetwork(secondaryNetworkName, secondarySubnet)
 		framework.ExpectNoError(err, "creation of network %q with subnet %s must succeed", secondaryNetworkName, secondarySubnet)
-		// this is only required for KinD infra provider
-		if isIPv6TestRun && infraprovider.Get().Name() == "kind" {
-			// HACK: ensure bridges don't talk to each other. For IPv6, docker support for isolated networks is experimental.
-			// Remove when it is no longer experimental. See func description for full details.
-			if err := isolateKinDIPv6Networks(primaryProviderNetwork.Name(), secondaryProviderNetwork.Name()); err != nil {
-				framework.Failf("failed to isolate IPv6 networks: %v", err)
-			}
-		}
 		nodes, err = f.ClientSet.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
 		framework.ExpectNoError(err, "must list all Nodes")
 		for _, node := range nodes.Items {
@@ -868,6 +851,15 @@ var _ = ginkgo.DescribeTableSubtree("e2e egress IP validation", feature.EgressIP
 	})
 
 	ginkgo.AfterEach(func() {
+		// ensure all nodes are ready and reachable before any other cleanup;
+		// tests may have left nodes NotReady or unreachable intentionally
+		for _, node := range []string{egress1Node.name, egress2Node.name} {
+			setNodeReady(providerCtx, node, true)
+			setNodeReachable(node, true)
+			waitForNoTaint(node, "node.kubernetes.io/unreachable")
+			waitForNoTaint(node, "node.kubernetes.io/not-ready")
+		}
+
 		nodes, err := e2enode.GetBoundedReadySchedulableNodes(context.TODO(), f.ClientSet, 3)
 		framework.ExpectNoError(err)
 		if len(nodes.Items) < 3 {
@@ -880,14 +872,6 @@ var _ = ginkgo.DescribeTableSubtree("e2e egress IP validation", feature.EgressIP
 		e2ekubectl.RunKubectlOrDie("default", "delete", "eip", egressIPName2, "--ignore-not-found=true")
 		e2ekubectl.RunKubectlOrDie("default", "label", "node", egress1Node.name, "k8s.ovn.org/egress-assignable-")
 		e2ekubectl.RunKubectlOrDie("default", "label", "node", egress2Node.name, "k8s.ovn.org/egress-assignable-")
-
-		// ensure all nodes are ready and reachable
-		for _, node := range []string{egress1Node.name, egress2Node.name} {
-			setNodeReady(providerCtx, node, true)
-			setNodeReachable(node, true)
-			waitForNoTaint(node, "node.kubernetes.io/unreachable")
-			waitForNoTaint(node, "node.kubernetes.io/not-ready")
-		}
 	})
 	// Validate the egress IP by creating a httpd container on the kind networking
 	// (effectively seen as "outside" the cluster) and curl it from a pod in the cluster
@@ -1568,11 +1552,8 @@ spec:
 
 		ginkgo.By("7. Check the OVN DB to ensure no SNATs are added for the standby egressIP")
 		ovnKubernetesNamespace := deploymentconfig.Get().OVNKubernetesNamespace()
-		dbPods, err := e2ekubectl.RunKubectl(ovnKubernetesNamespace, "get", "pods", "-l", "name=ovnkube-db", "-o=jsonpath='{.items..metadata.name}'")
+		dbPods, err := e2ekubectl.RunKubectl(ovnKubernetesNamespace, "get", "pods", "-l", "app=ovnkube-node", "--field-selector", fmt.Sprintf("spec.nodeName=%s", egress1Node.name), "-o=jsonpath='{.items..metadata.name}'")
 		dbContainerName := "nb-ovsdb"
-		if isInterconnectEnabled() {
-			dbPods, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "get", "pods", "-l", "app=ovnkube-node", "--field-selector", fmt.Sprintf("spec.nodeName=%s", egress1Node.name), "-o=jsonpath='{.items..metadata.name}'")
-		}
 		if err != nil || len(dbPods) == 0 {
 			framework.Failf("Error: Check the OVN DB to ensure no SNATs are added for the standby egressIP, err: %v", err)
 		}
@@ -1586,7 +1567,7 @@ spec:
 		if isIPv6TestRun {
 			logicalIP = fmt.Sprintf("logical_ip=\"%s\"", srcPodIP.String())
 		}
-		snats, err := e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", dbPod, "-c", dbContainerName, "--", "ovn-nbctl", "--no-leader-only", "--columns=external_ip", "find", "nat", logicalIP)
+		snats, err := e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", dbPod, "-c", dbContainerName, "--", "ovn-nbctl", "--columns=external_ip", "find", "nat", logicalIP)
 		if err != nil {
 			framework.Failf("Error: Check the OVN DB to ensure no SNATs are added for the standby egressIP, err: %v", err)
 		}
@@ -1650,7 +1631,7 @@ spec:
 		framework.ExpectNoError(err, "Step 11. Check connectivity from pod to an external container and verify that the srcIP is the expected standby egressIP3 from object2, failed: %v", err)
 
 		ginkgo.By("12. Check the OVN DB to ensure SNATs are added for only the standby egressIP")
-		snats, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", dbPod, "-c", dbContainerName, "--", "ovn-nbctl", "--no-leader-only", "--columns=external_ip", "find", "nat", logicalIP)
+		snats, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", dbPod, "-c", dbContainerName, "--", "ovn-nbctl", "--columns=external_ip", "find", "nat", logicalIP)
 		if err != nil {
 			framework.Failf("Error: Check the OVN DB to ensure SNATs are added for only the standby egressIP, err: %v", err)
 		}
@@ -1684,9 +1665,7 @@ spec:
 		})
 		framework.ExpectNoError(err, "Step 14. Ensure egressIP1 from egressIP object1 and egressIP3 from object2 is correctly transferred to egress2Node, failed: %v", err)
 
-		if isInterconnectEnabled() {
-			dbPods, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "get", "pods", "-l", "app=ovnkube-node", "--field-selector", fmt.Sprintf("spec.nodeName=%s", egress2Node.name), "-o=jsonpath='{.items..metadata.name}'")
-		}
+		dbPods, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "get", "pods", "-l", "app=ovnkube-node", "--field-selector", fmt.Sprintf("spec.nodeName=%s", egress2Node.name), "-o=jsonpath='{.items..metadata.name}'")
 		if err != nil || len(dbPods) == 0 {
 			framework.Failf("Error: Check the OVN DB to ensure no SNATs are added for the standby egressIP, err: %v", err)
 		}
@@ -1698,7 +1677,7 @@ spec:
 		}
 
 		ginkgo.By("15. Check the OVN DB to ensure SNATs are added for either egressIP1 or egressIP3")
-		snats, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", dbPod, "-c", dbContainerName, "--", "ovn-nbctl", "--no-leader-only", "--columns=external_ip", "find", "nat", logicalIP)
+		snats, err = e2ekubectl.RunKubectl(ovnKubernetesNamespace, "exec", dbPod, "-c", dbContainerName, "--", "ovn-nbctl", "--columns=external_ip", "find", "nat", logicalIP)
 		if err != nil {
 			framework.Failf("Error: Check the OVN DB to ensure SNATs are added for either egressIP1 or egressIP3, err: %v", err)
 		}
@@ -2159,35 +2138,24 @@ spec:
 		providerPrimaryNetwork, err := infraprovider.Get().PrimaryNetwork()
 		framework.ExpectNoError(err, "failed to get providers primary network")
 		externalContainerPrimary := infraapi.ExternalContainer{Name: "external-container-for-egressip-mtu-test", Image: images.AgnHost(),
-			Network: providerPrimaryNetwork, CmdArgs: []string{"pause"}, ExtPort: externalContainerPrimaryPort}
+			Network: providerPrimaryNetwork, RuntimeArgs: []string{"--sysctl", "net.ipv4.ip_no_pmtu_disc=2"},
+			CmdArgs: []string{"netexec", httpPort, udpPort}, ExtPort: externalContainerPrimaryPort}
 		externalContainerPrimary, err = providerCtx.CreateExternalContainer(externalContainerPrimary)
 		framework.ExpectNoError(err, "failed to create external container: %s", externalContainerPrimary.String())
 
-		// First disable PMTUD
-		_, err = infraprovider.Get().ExecExternalContainerCommand(externalContainerPrimary, []string{"sysctl", "-w", "net.ipv4.ip_no_pmtu_disc=2"})
-		framework.ExpectNoError(err, "disabling PMTUD in the external kind container failed: %v", err)
-		providerCtx.AddCleanUpFn(func() error {
-			_, err = infraprovider.Get().ExecExternalContainerCommand(externalContainerPrimary, []string{"sysctl", "-w", "net.ipv4.ip_no_pmtu_disc=0"})
-			return err
-		})
-
-		go func() {
-			_, _ = infraprovider.Get().ExecExternalContainerCommand(externalContainerPrimary, []string{"/agnhost", "netexec", httpPort, udpPort})
-		}()
-
 		ginkgo.By("Checking connectivity to the external kind container and verify that the source IP is the egress IP")
 		var curlErr error
-		_ = wait.PollUntilContextTimeout(
+		err = wait.PollUntilContextTimeout(
 			context.Background(),
 			retryInterval,
 			retryTimeout,
 			true,
 			func(ctx context.Context) (bool, error) {
-				curlErr := curlAgnHostClientIPFromPod(podNamespace.Name, pod1Name, egressIP1.String(), externalContainerPrimary.GetIPv4(), externalContainerPrimary.GetPortStr())
+				curlErr = curlAgnHostClientIPFromPod(podNamespace.Name, pod1Name, egressIP1.String(), externalContainerPrimary.GetIPv4(), externalContainerPrimary.GetPortStr())
 				return curlErr == nil, nil
 			},
 		)
-		framework.ExpectNoError(curlErr, "connectivity check to the external kind container failed: %v", curlErr)
+		framework.ExpectNoError(err, "connectivity check to the external kind container failed: %v", curlErr)
 
 		// We will ask the server to reply with a UDP packet bigger than the pod
 		// network MTU. Since PMTUD has been disabled on the server, the reply
@@ -2908,10 +2876,8 @@ spec:
 		}
 		// Enslaving a link to a VRF device may cause the removal of the non link local IPv6 address from the interface
 		// Look up the IP address, add it after enslaving the link and perform test.
-		networks, err := providerCtx.GetAttachedNetworks()
-		_, exists := networks.Get(secondaryNetworkName)
-		gomega.Expect(exists).Should(gomega.BeTrue(), "network %s must exist", secondaryNetworkName)
-		secondaryNetwork, _ := networks.Get(secondaryNetworkName)
+		secondaryNetwork, err := infraprovider.Get().GetNetwork(secondaryNetworkName)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "network %s must exist", secondaryNetworkName)
 		restoreLinkIPv6AddrFn := func() error { return nil }
 		if isV6Node {
 			ginkgo.By("attempting to find IPv6 global address for secondary network")
@@ -3007,10 +2973,8 @@ spec:
 			[]string{"ip", "neigh", "flush", egressIPSecondaryHost})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "should flush neighbor cache")
 
-		networks, err := providerCtx.GetAttachedNetworks()
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "should get attached networks")
-		secondaryNetwork, exists := networks.Get(secondaryNetworkName)
-		gomega.Expect(exists).Should(gomega.BeTrue(), "network %s must exist", secondaryNetworkName)
+		secondaryNetwork, err := infraprovider.Get().GetNetwork(secondaryNetworkName)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "network %s must exist", secondaryNetworkName)
 
 		inf, err := infraprovider.Get().GetExternalContainerNetworkInterface(secondaryTargetExternalContainer, secondaryNetwork)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "should have network interface for network %s on instance %s", secondaryNetwork.Name(), secondaryTargetExternalContainer.Name)
@@ -3443,6 +3407,120 @@ spec:
 		}
 	})
 
+	ginkgo.It("Should fail if egressip-mark annotation is present during EgressIP creation", func() {
+		ginkgo.By("1. Create an EgressIP object with one egress IP defined")
+		var egressIP1 net.IP
+		var err error
+		if utilnet.IsIPv6String(egress1Node.nodeIP) {
+			egressIP1, err = ipalloc.NewPrimaryIPv6()
+		} else {
+			egressIP1, err = ipalloc.NewPrimaryIPv4()
+		}
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred(), "must allocate new Node IP")
+
+		var egressIPConfig = `apiVersion: k8s.ovn.org/v1
+kind: EgressIP
+metadata:
+    name: ` + egressIPName + `
+    annotations:
+      ` + util.EgressIPMarkAnnotation + `: "50000"
+spec:
+    egressIPs:
+    - ` + egressIP1.String() + `
+    namespaceSelector:
+        matchLabels:
+            name: ` + f.Namespace.Name + `
+`
+		if err := os.WriteFile(egressIPYaml, []byte(egressIPConfig), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(egressIPYaml); err != nil {
+				framework.Logf("Unable to remove the CRD config from disk: %v", err)
+			}
+		}()
+
+		ginkgo.By("2. Create an EgressIP with k8s.ovn.org/egressip-mark annotation defined")
+		_, err = e2ekubectl.RunKubectl("default", "create", "-f", egressIPYaml)
+		gomega.Expect(err).To(gomega.HaveOccurred(), "Should fail if k8s.ovn.org/egressip-mark annotation is present during creation")
+		gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("EgressIP resources cannot be created with the \"k8s.ovn.org/egressip-mark\" annotation. This annotation is managed by the system.")))
+	})
+
+	ginkgo.It("Should fail if egressip-mark annotation is being added by a regular user", func() {
+		ginkgo.By("1. Add the \"k8s.ovn.org/egress-assignable\" label to egress1Node node")
+		egressNodeAvailabilityHandler := egressNodeAvailabilityHandlerViaLabel{f}
+		egressNodeAvailabilityHandler.Enable(egress1Node.name)
+		defer egressNodeAvailabilityHandler.Restore(egress1Node.name)
+
+		podNamespace := f.Namespace
+		labels := map[string]string{
+			"name": f.Namespace.Name,
+		}
+		updateNamespaceLabels(f, podNamespace, labels)
+
+		ginkgo.By("2. Create an EgressIP object with one egress IP defined")
+		var egressIP1 net.IP
+		var err error
+		if utilnet.IsIPv6String(egress1Node.nodeIP) {
+			egressIP1, err = ipalloc.NewPrimaryIPv6()
+		} else {
+			egressIP1, err = ipalloc.NewPrimaryIPv4()
+		}
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred(), "must allocate new Node IP")
+
+		var egressIPConfig = `apiVersion: k8s.ovn.org/v1
+kind: EgressIP
+metadata:
+    name: ` + egressIPName + `
+spec:
+    egressIPs:
+    - ` + egressIP1.String() + `
+    namespaceSelector:
+        matchLabels:
+            name: ` + f.Namespace.Name + `
+`
+		if err := os.WriteFile(egressIPYaml, []byte(egressIPConfig), 0644); err != nil {
+			framework.Failf("Unable to write CRD config to disk: %v", err)
+		}
+		defer func() {
+			if err := os.Remove(egressIPYaml); err != nil {
+				framework.Logf("Unable to remove the CRD config from disk: %v", err)
+			}
+		}()
+
+		framework.Logf("Create the EgressIP configuration")
+		e2ekubectl.RunKubectlOrDie("default", "create", "-f", egressIPYaml)
+
+		ginkgo.By("3. Check that the status is of length one and that it is assigned to egress1Node")
+		statuses := verifyEgressIPStatusLengthEquals(1, nil)
+		if statuses[0].Node != egress1Node.name {
+			framework.Failf("Step 3. Check that the status is of length one and that it is assigned to egress1Node, failed")
+		}
+
+		ginkgo.By("4. Try updating k8s.ovn.org/egressip-mark annotation")
+		// Get the current annotation value to ensure we try to overwrite with a different value
+		annotationsJSON, err := e2ekubectl.RunKubectl("", "get", "egressip", egressIPName, "-o", "jsonpath={.metadata.annotations}")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to get annotations")
+		var annotations map[string]string
+		err = json.Unmarshal([]byte(annotationsJSON), &annotations)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to unmarshal annotations JSON")
+		currentValue := annotations[util.EgressIPMarkAnnotation]
+
+		newValue := 50000
+		if currentValue == "50000" {
+			newValue = 50001
+		}
+
+		_, err = e2ekubectl.RunKubectl("", "annotate", "--overwrite", "egressip", egressIPName, fmt.Sprintf("%s=%d", util.EgressIPMarkAnnotation, newValue))
+		gomega.Expect(err).To(gomega.HaveOccurred(), "Should fail if k8s.ovn.org/egressip-mark is being updated")
+		gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("The \"k8s.ovn.org/egressip-mark\" annotation cannot be modified or removed once set. This annotation is managed by the system.")))
+
+		ginkgo.By("5. Try removing k8s.ovn.org/egressip-mark annotation")
+		_, err = e2ekubectl.RunKubectl("", "annotate", "--overwrite", "egressip", egressIPName, fmt.Sprintf("%s-", util.EgressIPMarkAnnotation))
+		gomega.Expect(err).To(gomega.HaveOccurred(), "Should fail if k8s.ovn.org/egressip-mark is being removed")
+		gomega.Expect(err).To(gomega.MatchError(gomega.ContainSubstring("The \"k8s.ovn.org/egressip-mark\" annotation cannot be modified or removed once set. This annotation is managed by the system.")))
+	})
+
 	ginkgo.DescribeTable("[OVN network] multiple namespaces with different primary networks", func(otherNetworkAttachParms networkAttachmentConfigParams) {
 		if !isNetworkSegmentationEnabled() {
 			ginkgo.Skip("network segmentation is disabled")
@@ -3450,10 +3528,9 @@ spec:
 		var otherNetworkNamespace *corev1.Namespace
 		var err error
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
-		isOtherNetworkIPv6 := utilnet.IsIPv6CIDRString(otherNetworkAttachParms.cidr)
 		// The EgressIP IP must match both networks IP family
-		if isOtherNetworkIPv6 != isIPv6TestRun {
-			ginkgo.Skip(fmt.Sprintf("Test run IP family (is IPv6: %v) doesn't match other networks IP family (is IPv6: %v)", isIPv6TestRun, isOtherNetworkIPv6))
+		if !cidrsContainIPFamily(otherNetworkAttachParms.cidr, isIPv6TestRun) {
+			ginkgo.Skip(fmt.Sprintf("Test run IP family (is IPv6: %v) isn't supported by other network", isIPv6TestRun))
 		}
 		// is the test namespace a CDN? If so create the UDN namespace
 		if isClusterDefaultNetwork(netConfigParams) {
@@ -3564,7 +3641,7 @@ spec:
 		ginkgo.Entry("L3 Primary UDN", networkAttachmentConfigParams{
 			name:     "l3primary",
 			topology: types.Layer3Topology,
-			cidr:     joinStrings("30.10.0.0/16", "2014:100:200::0/60"),
+			cidr:     primaryLayer3MultiCIDRs(),
 			role:     "primary",
 		}),
 		ginkgo.Entry("L2 Primary UDN", networkAttachmentConfigParams{
@@ -3588,7 +3665,7 @@ spec:
 		networkAttachmentConfigParams{
 			name:     "l3primaryv4",
 			topology: types.Layer3Topology,
-			cidr:     "10.10.0.0/16",
+			cidr:     primaryLayer3MultiIPv4CIDRs(),
 			role:     "primary",
 		},
 	),
@@ -3597,7 +3674,7 @@ spec:
 		networkAttachmentConfigParams{
 			name:     "l3primaryv6",
 			topology: types.Layer3Topology,
-			cidr:     "2014:100:200::0/60",
+			cidr:     primaryLayer3MultiIPv6CIDRs(),
 			role:     "primary",
 		},
 	),
